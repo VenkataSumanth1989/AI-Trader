@@ -35,3 +35,23 @@ def get_stock_data(ticker_symbol: str):
         "change_percent": change_percent,
         "volume": int(latest["Volume"]),
     }
+def get_historical_data(
+    ticker_symbol: str,
+    period: str = "1mo",
+    interval: str = "1d"
+):
+    """
+    Fetch historical OHLCV data for a stock.
+    """
+
+    ticker = yf.Ticker(ticker_symbol)
+
+    history = ticker.history(
+        period=period,
+        interval=interval
+    )
+
+    if history.empty:
+        raise ValueError(f"No historical data found for {ticker_symbol}")
+
+    return history
