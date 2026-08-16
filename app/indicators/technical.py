@@ -4,6 +4,125 @@ from numpy import histogram
 import pandas as pd
 
 
+def add_advanced_indicators(data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add Stochastic, ATR and ADX indicators.
+
+    Stochastic:
+        %K = 100 * (Close - Lowest Low) / (Highest High - Lowest Low)
+        %D = moving average of %K
+
+    ATR:
+        Average True Range, measuring market volatility.
+
+    ADX:
+        Average Directional Index, measuring trend strength.
+    """
+
+    data = data.copy()
+
+    # --------------------------------------------------
+    # STOCHASTIC
+    # --------------------------------------------------
+
+    lowest_low = data["Low"].rolling(window=14).min()
+    highest_high = data["High"].rolling(window=14).max()
+
+    data["STOCH_K"] = (
+        100
+        * (data["Close"] - lowest_low)
+        / (highest_high - lowest_low)
+    )
+
+    data["STOCH_D"] = (
+        data["STOCH_K"]
+        .rolling(window=3)
+        .mean()
+    )
+
+    # --------------------------------------------------
+    # ATR
+    # --------------------------------------------------
+
+    previous_close = data["Close"].shift(1)
+
+    true_range_1 = data["High"] - data["Low"]
+
+    true_range_2 = (
+        data["High"] - previous_close
+    ).abs()
+
+    true_range_3 = (
+        data["Low"] - previous_close
+    ).abs()
+
+    true_range = pd.concat(
+        [
+            true_range_1,
+            true_range_2,
+            true_range_3,
+        ],
+        axis=1
+    ).max(axis=1)
+
+    data["ATR_14"] = (
+        true_range
+        .rolling(window=14)
+        .mean()
+    )
+
+    # --------------------------------------------------
+    # ADX
+    # --------------------------------------------------
+
+        # --------------------------------------------------
+    # ADX + DIRECTIONAL INDICATORS
+    # --------------------------------------------------
+
+    high_diff = data["High"].diff()
+    low_diff = -data["Low"].diff()
+
+    plus_dm = high_diff.where(
+        (high_diff > low_diff) & (high_diff > 0),
+        0.0
+    )
+
+    minus_dm = low_diff.where(
+        (low_diff > high_diff) & (low_diff > 0),
+        0.0
+    )
+
+    atr = true_range.rolling(window=14).mean()
+
+    plus_di = (
+        100
+        * plus_dm.rolling(window=14).mean()
+        / atr
+    )
+
+    minus_di = (
+        100
+        * minus_dm.rolling(window=14).mean()
+        / atr
+    )
+
+    data["DI_PLUS_14"] = plus_di
+    data["DI_MINUS_14"] = minus_di
+
+    di_sum = plus_di + minus_di
+
+    dx = (
+        100
+        * (plus_di - minus_di).abs()
+        / di_sum
+    )
+
+    data["ADX_14"] = (
+        dx.rolling(window=14).mean()
+    )
+
+    return data
+
 def calculate_ema(data: pd.DataFrame, period: int) -> pd.Series:
     """
     Calculate Exponential Moving Average.

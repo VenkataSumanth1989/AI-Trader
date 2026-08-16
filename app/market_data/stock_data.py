@@ -55,3 +55,26 @@ def get_historical_data(
         raise ValueError(f"No historical data found for {ticker_symbol}")
 
     return history
+def get_daily_data(ticker_symbol: str, period: str = "2y"):
+    """
+    Fetch daily OHLCV data for long-term trend analysis.
+
+    Used for:
+        - SMA 50
+        - SMA 200
+        - Long-term market regime
+    """
+
+    ticker = yf.Ticker(ticker_symbol)
+
+    history = ticker.history(
+        period=period,
+        interval="1d"
+    )
+
+    if history.empty:
+        raise ValueError(
+            f"No daily market data found for {ticker_symbol}"
+        )
+
+    return history

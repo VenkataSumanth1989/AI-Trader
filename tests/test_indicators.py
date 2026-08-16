@@ -1,6 +1,7 @@
 from app.config import DEFAULT_TICKER
 from app.market_data.stock_data import get_historical_data
 from app.indicators.technical import add_technical_indicators
+from app.indicators.technical import add_advanced_indicators
 
 
 data = get_historical_data(
@@ -10,6 +11,7 @@ data = get_historical_data(
 )
 
 data = add_technical_indicators(data)
+data = add_advanced_indicators(data)
 
 print(f"\n{DEFAULT_TICKER} Technical Indicators")
 print("=" * 100)
@@ -30,3 +32,9 @@ for timestamp, row in latest.iterrows():
     print(f"MACD Signal:      {row['MACD_SIGNAL']:.4f}")
     print(f"MACD Histogram:   {row['MACD_HISTOGRAM']:.4f}")
     print(f"Relative Volume:  {row['RELATIVE_VOLUME']:.2f}x")
+    print(f"Stochastic %K:    {row['STOCH_K']:.2f}")
+    print(f"Stochastic %D:    {row['STOCH_D']:.2f}")
+    print(f"ATR 14:           {row['ATR_14']:.2f}")
+    print(f"ADX 14:           {row['ADX_14']:.2f}")
+    print(f"DI + 14:          {row['DI_PLUS_14']:.2f}")
+    print(f"DI - 14:          {row['DI_MINUS_14']:.2f}")
