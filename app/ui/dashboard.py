@@ -16,12 +16,16 @@ import streamlit as st
 import pandas as pd
 import streamlit.components.v1 as components
 import json
+import math
 
 from datetime import datetime
 
 from app.config import DEFAULT_TICKER
 
-from app.market_data.stock_data import get_historical_data
+from app.market_data.stock_data import (
+    get_historical_data,
+    get_multi_timeframe_data,
+)
 
 from app.indicators.technical import (
     add_technical_indicators,
@@ -80,6 +84,18 @@ from app.indicators.bollinger_bands import (
 from app.indicators.obv import (
     add_obv,
     analyze_obv,
+)
+
+from app.indicators.market_structure import (
+    detect_market_structure_break,
+)
+
+from app.indicators.order_blocks import (
+    detect_order_block,
+)
+
+from app.indicators.support_resistance import (
+    detect_support_resistance,
 )
 
 
@@ -444,6 +460,410 @@ def analyze_stock(ticker_symbol):
 
 
 
+
+
+# ============================================================
+# MULTI-TIMEFRAME ANALYSIS
+# ============================================================
+
+def _timeframe_snapshot(frame):
+    """
+    Calculate one timeframe's technical snapshot, including
+    Market Structure Break and candidate Order Block.
+    """
+    raw_frame = frame.copy()
+
+    indicator_frame = add_technical_indicators(raw_frame.copy())
+    indicator_frame = add_advanced_indicators(indicator_frame)
+    latest = indicator_frame.iloc[-1]
+
+    ema9 = float(latest["EMA_9"])
+    ema20 = float(latest["EMA_20"])
+    ema50 = float(latest["EMA_50"])
+    stoch_k = float(latest["STOCH_K"])
+    stoch_d = float(latest["STOCH_D"])
+    macd = float(latest["MACD"])
+    macd_signal = float(latest["MACD_SIGNAL"])
+    adx = float(latest["ADX_14"])
+    di_plus = float(latest["DI_PLUS_14"])
+    di_minus = float(latest["DI_MINUS_14"])
+
+    if ema9 > ema20 > ema50:
+        trend = "BULLISH"
+    elif ema9 < ema20 < ema50:
+        trend = "BEARISH"
+    else:
+        trend = "MIXED"
+
+    stochastic = (
+        "BULLISH" if stoch_k > stoch_d
+        else "BEARISH" if stoch_k < stoch_d
+        else "NEUTRAL"
+    )
+
+    macd_state = (
+        "BULLISH" if macd > macd_signal
+        else "BEARISH" if macd < macd_signal
+        else "NEUTRAL"
+    )
+
+    if adx >= 20 and di_plus > di_minus:
+        direction = "BULLISH"
+    elif adx >= 20 and di_minus > di_plus:
+        direction = "BEARISH"
+    else:
+        direction = "MIXED"
+
+    # Market structure is intentionally calculated from the raw OHLC candles.
+    msb = detect_market_structure_break(
+        raw_frame,
+        swing_window=3,
+        lookback=min(100, len(raw_frame)),
+    )
+
+    order_block = detect_order_block(
+        raw_frame,
+        msb,
+        search_back=20,
+    )
+
+    support_resistance = detect_support_resistance(
+        raw_frame,
+        lookback=min(120, len(raw_frame)),
+        swing_window=3,
+        tolerance_percent=0.30,
+    )
+
+    zone_low = order_block.get("zone_low")
+    zone_high = order_block.get("zone_high")
+
+    if zone_low is not None and zone_high is not None:
+        ob_zone = f"${zone_low:.2f} - ${zone_high:.2f}"
+    else:
+        ob_zone = "N/A"
+
+    return {
+        "rsi": float(latest["RSI_14"]),
+        "stoch_k": stoch_k,
+        "stoch_d": stoch_d,
+        "stochastic": stochastic,
+        "ema9": ema9,
+        "ema20": ema20,
+        "ema50": ema50,
+        "trend": trend,
+        "macd_state": macd_state,
+        "adx": adx,
+        "direction": direction,
+
+        # Market structure / order block
+        "msb": msb.get("msb", "NONE"),
+        "msb_direction": msb.get("direction", "NEUTRAL"),
+        "msb_confidence": msb.get("confidence", 0),
+        "msb_break_level": msb.get("break_level"),
+        "order_block": order_block.get("order_block", "NONE"),
+        "ob_direction": order_block.get("direction", "NEUTRAL"),
+        "ob_confidence": order_block.get("confidence", 0),
+        "ob_zone": ob_zone,
+        "ob_position": order_block.get("price_position", "UNKNOWN"),
+        "ob_revisited": order_block.get("revisited", False),
+        "ob_status": order_block.get("status", "NONE"),
+
+        # Support / Resistance
+        "support": support_resistance.get("support"),
+        "resistance": support_resistance.get("resistance"),
+        "sr_position": support_resistance.get("position", "UNKNOWN"),
+        "breakout": support_resistance.get("breakout", "NONE"),
+        "sr_confidence": support_resistance.get("confidence", 0),
+        "support_touches": support_resistance.get("support_touches", 0),
+        "resistance_touches": support_resistance.get("resistance_touches", 0),
+    }
+
+
+def calculate_multi_timeframe_analysis(ticker_symbol):
+    frames = get_multi_timeframe_data(ticker_symbol)
+    snapshots = {
+        key: _timeframe_snapshot(frame)
+        for key, frame in frames.items()
+    }
+
+    daily = frames["1d"].copy()
+    daily = daily.dropna(subset=["Close", "High", "Low"])
+    valid_days = len(daily)
+
+    if valid_days == 0:
+        raise ValueError(f"No valid daily history found for {ticker_symbol}")
+
+    current = float(daily["Close"].iloc[-1])
+
+    has_50 = valid_days >= 50
+    has_200 = valid_days >= 200
+
+    sma50 = (
+        float(daily["Close"].tail(50).mean())
+        if has_50 else None
+    )
+    sma200 = (
+        float(daily["Close"].tail(200).mean())
+        if has_200 else None
+    )
+
+    high50 = float(daily["High"].tail(50).max()) if has_50 else None
+    low50 = float(daily["Low"].tail(50).min()) if has_50 else None
+    high200 = float(daily["High"].tail(200).max()) if has_200 else None
+    low200 = float(daily["Low"].tail(200).min()) if has_200 else None
+
+    levels = {
+        "current": current,
+        "sma50": sma50,
+        "sma200": sma200,
+        "high50": high50,
+        "low50": low50,
+        "high200": high200,
+        "low200": low200,
+        "valid_days": valid_days,
+        "has_50": has_50,
+        "has_200": has_200,
+    }
+
+    # Never infer a 200-SMA target from missing history.
+    if not has_200 or sma200 is None or not math.isfinite(sma200):
+        return {
+            "snapshots": snapshots,
+            "levels": levels,
+            "target": {
+                "available": False,
+                "location": "N/A",
+                "distance": None,
+                "percent": None,
+                "score": None,
+                "outlook": "NOT AVAILABLE",
+                "reasons": [],
+                "blockers": [
+                    f"Only {valid_days} valid daily candles are available; "
+                    "at least 200 are required for 200-day SMA target analysis."
+                ],
+            },
+        }
+
+    distance = sma200 - current
+    percent = (distance / current) * 100 if current else 0.0
+
+    if abs(distance) <= max(0.01, current * 0.001):
+        target_direction = "AT_TARGET"
+        location = "AT PRICE"
+    elif distance > 0:
+        target_direction = "UP"
+        location = "ABOVE PRICE"
+    else:
+        target_direction = "DOWN"
+        location = "BELOW PRICE"
+
+    score = 50
+    reasons = []
+    blockers = []
+
+    def supports(state):
+        return (
+            (target_direction == "UP" and state == "BULLISH")
+            or (target_direction == "DOWN" and state == "BEARISH")
+        )
+
+    def opposes(state):
+        return (
+            (target_direction == "UP" and state == "BEARISH")
+            or (target_direction == "DOWN" and state == "BULLISH")
+        )
+
+    if target_direction == "AT_TARGET":
+        score = 100
+        reasons.append("Price is already approximately at the 200-day SMA")
+    else:
+        checks = [
+            ("4H moving-average trend", snapshots["4h"]["trend"], 15),
+            ("4H Stochastic", snapshots["4h"]["stochastic"], 10),
+            ("4H MACD", snapshots["4h"]["macd_state"], 10),
+            ("4H ADX/DI direction", snapshots["4h"]["direction"], 10),
+            ("4H Market Structure Break", snapshots["4h"]["msb_direction"], 10),
+            (
+                "4H Order Block direction",
+                snapshots["4h"]["ob_direction"]
+                if snapshots["4h"]["ob_status"] in ("ACTIVE", "RETESTED")
+                else "NEUTRAL",
+                5,
+            ),
+            ("1H trend confirmation", snapshots["1h"]["trend"], 7),
+            ("Daily trend", snapshots["1d"]["trend"], 8),
+        ]
+
+        for label, state, weight in checks:
+            if supports(state):
+                score += weight
+                reasons.append(f"{label} supports movement toward the 200-day SMA")
+            elif opposes(state):
+                score -= weight
+                blockers.append(f"{label} opposes movement toward the 200-day SMA")
+
+        # Order-block position is secondary context.
+        # It does not predict a move by itself; it only adds/subtracts
+        # a small amount when the current price location agrees with
+        # the target direction.
+        ob_position_4h = snapshots["4h"]["ob_position"]
+        ob_status_4h = snapshots["4h"]["ob_status"]
+
+        if ob_status_4h == "INVALIDATED":
+            blockers.append(
+                "The latest 4H order block has been invalidated, so it is not "
+                "used as directional support"
+            )
+
+        if ob_status_4h in ("ACTIVE", "RETESTED") and target_direction == "UP":
+            if ob_position_4h == "ABOVE_OB":
+                score += 3
+                reasons.append(
+                    "Price is above the 4H bullish order-block zone"
+                )
+            elif ob_position_4h == "BELOW_OB":
+                score -= 3
+                blockers.append(
+                    "Price is below the 4H order-block zone"
+                )
+
+        elif ob_status_4h in ("ACTIVE", "RETESTED") and target_direction == "DOWN":
+            if ob_position_4h == "BELOW_OB":
+                score += 3
+                reasons.append(
+                    "Price is below the 4H order-block zone"
+                )
+            elif ob_position_4h == "ABOVE_OB":
+                score -= 3
+                blockers.append(
+                    "Price is above the 4H bullish order-block zone"
+                )
+
+        # 4H Support / Resistance context.
+        # This is intentionally lower weight than MSB because S/R levels are
+        # structural context, while a confirmed structure break is stronger evidence.
+        sr4_support = snapshots["4h"]["support"]
+        sr4_resistance = snapshots["4h"]["resistance"]
+        sr4_breakout = snapshots["4h"]["breakout"]
+        sr4_position = snapshots["4h"]["sr_position"]
+
+        # Breakout is strong directional evidence when it points toward the target.
+        if sr4_breakout == "BULLISH_BREAKOUT":
+            if target_direction == "UP":
+                score += 8
+                reasons.append(
+                    "4H bullish breakout supports movement toward the 200-day SMA"
+                )
+            elif target_direction == "DOWN":
+                score -= 8
+                blockers.append(
+                    "4H bullish breakout opposes movement toward the 200-day SMA"
+                )
+
+        elif sr4_breakout == "BEARISH_BREAKDOWN":
+            if target_direction == "DOWN":
+                score += 8
+                reasons.append(
+                    "4H bearish breakdown supports movement toward the 200-day SMA"
+                )
+            elif target_direction == "UP":
+                score -= 8
+                blockers.append(
+                    "4H bearish breakdown opposes movement toward the 200-day SMA"
+                )
+
+        # If still inside the range, use proximity to the relevant boundary
+        # as mild context only.
+        elif (
+            sr4_breakout == "NONE"
+            and sr4_support is not None
+            and sr4_resistance is not None
+        ):
+            current_price_4h = levels["current"]
+
+            if target_direction == "UP":
+                distance_to_resistance = (
+                    (sr4_resistance - current_price_4h) / current_price_4h * 100
+                    if current_price_4h
+                    else None
+                )
+
+                if (
+                    distance_to_resistance is not None
+                    and 0 <= distance_to_resistance <= 2
+                ):
+                    blockers.append(
+                        "4H resistance is within 2% above current price"
+                    )
+
+            elif target_direction == "DOWN":
+                distance_to_support = (
+                    (current_price_4h - sr4_support) / current_price_4h * 100
+                    if current_price_4h
+                    else None
+                )
+
+                if (
+                    distance_to_support is not None
+                    and 0 <= distance_to_support <= 2
+                ):
+                    blockers.append(
+                        "4H support is within 2% below current price"
+                    )
+
+        rsi4 = snapshots["4h"]["rsi"]
+        if target_direction == "UP":
+            if 50 <= rsi4 < 70:
+                score += 8
+                reasons.append("4H RSI supports upward momentum")
+            elif rsi4 < 40:
+                score -= 8
+                blockers.append("4H RSI is weak for an upward target")
+            elif rsi4 >= 70:
+                blockers.append("4H RSI is overbought; upward move may be extended")
+        else:
+            if 30 < rsi4 <= 50:
+                score += 8
+                reasons.append("4H RSI supports downward momentum")
+            elif rsi4 > 60:
+                score -= 8
+                blockers.append("4H RSI is strong against the downward target")
+            elif rsi4 <= 30:
+                blockers.append("4H RSI is oversold; downside may be extended")
+
+        if abs(percent) > 25:
+            score -= 10
+            blockers.append("The 200-day SMA is more than 25% away")
+        elif abs(percent) > 15:
+            score -= 5
+            blockers.append("The 200-day SMA is relatively far away")
+
+    score = max(0, min(100, int(round(score))))
+    outlook = (
+        "AT TARGET" if target_direction == "AT_TARGET"
+        else "STRONGLY SUPPORTED" if score >= 75
+        else "POSSIBLE" if score >= 60
+        else "MIXED" if score >= 45
+        else "LOW SUPPORT"
+    )
+
+    return {
+        "snapshots": snapshots,
+        "levels": levels,
+        "target": {
+            "available": True,
+            "location": location,
+            "distance": distance,
+            "percent": percent,
+            "score": score,
+            "outlook": outlook,
+            "reasons": reasons,
+            "blockers": blockers,
+        },
+    }
+
+
 # ============================================================
 # LIVE ANALYSIS + SIGNAL TRACKING
 # ============================================================
@@ -474,6 +894,10 @@ def render_live_dashboard():
                 bollinger_analysis,
                 obv_analysis,
             ) = analyze_stock(current_ticker)
+
+            multi_timeframe = calculate_multi_timeframe_analysis(
+                current_ticker
+            )
 
     except Exception as e:
         st.error(f"Unable to analyze {current_ticker}: {e}")
@@ -567,6 +991,7 @@ def render_live_dashboard():
         "setup_quality": setup_quality,
         "risk_guard": risk_guard,
         "final_decision": final_decision,
+        "multi_timeframe": multi_timeframe,
     }
 
 
@@ -707,6 +1132,165 @@ def render_live_dashboard():
 
 
     # ============================================================
+    # MULTI-TIMEFRAME SNAPSHOT — ALWAYS VISIBLE ABOVE CHART
+    # ============================================================
+
+    st.subheader("🧭 Multi-Timeframe Snapshot")
+
+    snapshots = multi_timeframe["snapshots"]
+    mtf_rows = []
+
+    for label, key in [
+        ("1 Hour", "1h"),
+        ("4 Hour", "4h"),
+        ("Daily", "1d"),
+    ]:
+        snap = snapshots[key]
+        mtf_rows.append({
+            "Timeframe": label,
+            "RSI 14": round(snap["rsi"], 2),
+            "Stoch %K": round(snap["stoch_k"], 2),
+            "Stoch %D": round(snap["stoch_d"], 2),
+            "Stochastic": snap["stochastic"],
+            "EMA 9": round(snap["ema9"], 2),
+            "EMA 20": round(snap["ema20"], 2),
+            "EMA 50": round(snap["ema50"], 2),
+            "MA Trend": snap["trend"],
+            "MACD": snap["macd_state"],
+            "ADX": round(snap["adx"], 2),
+            "Direction": snap["direction"],
+            "MSB": snap["msb"],
+            "MSB Level": (
+                f"${snap['msb_break_level']:.2f}"
+                if snap["msb_break_level"] is not None
+                else "N/A"
+            ),
+            "MSB Conf": f"{snap['msb_confidence']}%",
+            "Order Block": snap["order_block"],
+            "OB Zone": snap["ob_zone"],
+            "OB Position": snap["ob_position"],
+            "OB Status": snap["ob_status"],
+            "OB Revisited": "YES" if snap["ob_revisited"] else "NO",
+            "S/R": (
+                f"${snap['support']:.2f} / ${snap['resistance']:.2f}"
+                if snap["support"] is not None and snap["resistance"] is not None
+                else "N/A"
+            ),
+            "Breakout": snap["breakout"],
+        })
+
+    st.dataframe(
+        pd.DataFrame(mtf_rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.caption(
+        "Each row is calculated from that timeframe's own candles. "
+        "S/R combines Support / Resistance into one compact column to keep the "
+        "single-shot table readable. Breakout shows whether the latest close is "
+        "still inside the range or has broken a detected level."
+    )
+
+    st.subheader("📐 50 / 200-Day Strategic Levels")
+
+    levels = multi_timeframe["levels"]
+    l1, l2, l3, l4 = st.columns(4)
+
+    def format_price(value):
+        return f"${value:.2f}" if value is not None and math.isfinite(value) else "N/A"
+
+    def format_range(high_value, low_value):
+        if (
+            high_value is None
+            or low_value is None
+            or not math.isfinite(high_value)
+            or not math.isfinite(low_value)
+        ):
+            return "N/A"
+        return f"${high_value:.2f} / ${low_value:.2f}"
+
+    with l1:
+        st.metric("50-Day SMA", format_price(levels["sma50"]))
+    with l2:
+        st.metric("200-Day SMA", format_price(levels["sma200"]))
+    with l3:
+        st.metric(
+            "50-Day High / Low",
+            format_range(levels["high50"], levels["low50"]),
+        )
+    with l4:
+        st.metric(
+            "200-Day High / Low",
+            format_range(levels["high200"], levels["low200"]),
+        )
+
+    if not levels["has_50"]:
+        st.info(
+            f"Only {levels['valid_days']} valid daily candles are available. "
+            "50-day strategic levels require at least 50."
+        )
+    elif not levels["has_200"]:
+        st.info(
+            f"Only {levels['valid_days']} valid daily candles are available. "
+            "200-day SMA/high/low require at least 200, so those values are shown as N/A."
+        )
+
+    st.subheader("🎯 4H → 200-Day SMA Target Analysis")
+
+    target = multi_timeframe["target"]
+    t1, t2, t3, t4 = st.columns(4)
+
+    with t1:
+        st.metric("Move Toward 200-Day SMA", target["outlook"])
+    with t2:
+        st.metric(
+            "Support Score",
+            f"{target['score']}/100" if target["score"] is not None else "N/A",
+        )
+    with t3:
+        if target["available"]:
+            st.metric(
+                "Distance to 200 SMA",
+                f"${target['distance']:+.2f}",
+                f"{target['percent']:+.2f}%",
+            )
+        else:
+            st.metric("Distance to 200 SMA", "N/A")
+    with t4:
+        st.metric("200-Day SMA Location", target["location"])
+
+    st.caption(
+        "200-Day SMA Location only tells you where the SMA sits relative to "
+        "current price. Move Toward 200-Day SMA measures technical confluence from "
+        "trend, momentum, ADX/DI, MSB, Order Block, Support/Resistance, breakout "
+        "context and multiple timeframes; it is not a statistical probability or "
+        "price guarantee."
+    )
+
+    if not target["available"]:
+        st.warning(target["blockers"][0])
+    else:
+        target_left, target_right = st.columns(2)
+
+        with target_left:
+            st.markdown("**Supporting evidence**")
+            if target["reasons"]:
+                for reason in target["reasons"]:
+                    st.write(f"✅ {reason}")
+            else:
+                st.write("No strong supporting evidence.")
+
+        with target_right:
+            st.markdown("**Opposing / caution evidence**")
+            if target["blockers"]:
+                for blocker in target["blockers"]:
+                    st.write(f"⚠️ {blocker}")
+            else:
+                st.write("No major opposing evidence detected.")
+
+
+    # ============================================================
     # TRADINGVIEW CHART
     # ============================================================
 
@@ -742,200 +1326,243 @@ def render_live_dashboard():
     )
 
 
+    with st.expander("🧱 Support / Resistance Details", expanded=False):
+
+        sr_rows = []
+
+        for label, key in [
+            ("1 Hour", "1h"),
+            ("4 Hour", "4h"),
+            ("Daily", "1d"),
+        ]:
+            snap = snapshots[key]
+
+            sr_rows.append({
+                "Timeframe": label,
+                "Support": (
+                    f"${snap['support']:.2f}"
+                    if snap["support"] is not None
+                    else "N/A"
+                ),
+                "Support Touches": snap["support_touches"],
+                "Resistance": (
+                    f"${snap['resistance']:.2f}"
+                    if snap["resistance"] is not None
+                    else "N/A"
+                ),
+                "Resistance Touches": snap["resistance_touches"],
+                "Position": snap["sr_position"],
+                "Breakout": snap["breakout"],
+                "Confidence": f"{snap['sr_confidence']}%",
+            })
+
+        st.dataframe(
+            pd.DataFrame(sr_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.caption(
+            "Support and resistance are clustered from confirmed swing lows/highs. "
+            "Breakout requires the latest close to move beyond the detected level. "
+            "Touch count and confidence are supporting context, not probabilities."
+        )
+
+
     # ============================================================
     # FINAL DECISION
     # ============================================================
+    with st.expander("🎯 AI-Trader Final Decision", expanded=True):
 
-    st.subheader("🎯 AI-Trader Final Decision")
 
-    decision = final_decision.get(
-        "decision",
-        "WAIT",
-    )
-
-    decision_col, setup_col, risk_col = st.columns(3)
-
-    with decision_col:
-
-        if decision == "BUY":
-            st.success("🟢 BUY")
-        elif decision == "SELL":
-            st.error("🔴 SELL")
-        elif decision == "NO_TRADE":
-            st.error("⛔ NO TRADE")
-        else:
-            st.warning("🟡 WAIT")
-
-        st.metric(
-            "Final Confidence",
-            f"{final_decision.get('confidence', 0)}%",
+        decision = final_decision.get(
+            "decision",
+            "WAIT",
         )
 
-    with setup_col:
+        decision_col, setup_col, risk_col = st.columns(3)
 
-        st.metric(
-            "Direction",
-            final_decision.get(
-                "direction",
-                setup["direction"],
-            ),
-        )
+        with decision_col:
 
-        st.write(
-            f"**Market Regime:** "
-            f"{setup['market_regime']}"
-        )
+            if decision == "BUY":
+                st.success("🟢 BUY")
+            elif decision == "SELL":
+                st.error("🔴 SELL")
+            elif decision == "NO_TRADE":
+                st.error("⛔ NO TRADE")
+            else:
+                st.warning("🟡 WAIT")
 
-        st.write(
-            f"**Setup:** "
-            f"{setup['setup']}"
-        )
+            st.metric(
+                "Final Confidence",
+                f"{final_decision.get('confidence', 0)}%",
+            )
 
-        st.write(
-            f"**Setup Quality:** "
-            f"{setup_quality['quality']} "
-            f"({setup_quality['score']}/100)"
-        )
+        with setup_col:
 
-    with risk_col:
+            st.metric(
+                "Direction",
+                final_decision.get(
+                    "direction",
+                    setup["direction"],
+                ),
+            )
 
-        entry_confirmed = confirmation.get(
-            "confirmed",
-            False,
-        )
+            st.write(
+                f"**Market Regime:** "
+                f"{setup['market_regime']}"
+            )
 
-        st.metric(
-            "Entry Confirmed",
-            "YES" if entry_confirmed else "NO",
-        )
+            st.write(
+                f"**Setup:** "
+                f"{setup['setup']}"
+            )
 
-        st.write(
-            f"**Entry Decision:** "
-            f"{confirmation.get('decision', 'NO_ENTRY')}"
-        )
+            st.write(
+                f"**Setup Quality:** "
+                f"{setup_quality['quality']} "
+                f"({setup_quality['score']}/100)"
+            )
 
-        st.write(
-            f"**Risk Guard:** "
-            f"{'ALLOWED' if risk_guard.get('allowed', False) else 'BLOCKED'}"
-        )
+        with risk_col:
+
+            entry_confirmed = confirmation.get(
+                "confirmed",
+                False,
+            )
+
+            st.metric(
+                "Entry Confirmed",
+                "YES" if entry_confirmed else "NO",
+            )
+
+            st.write(
+                f"**Entry Decision:** "
+                f"{confirmation.get('decision', 'NO_ENTRY')}"
+            )
+
+            st.write(
+                f"**Risk Guard:** "
+                f"{'ALLOWED' if risk_guard.get('allowed', False) else 'BLOCKED'}"
+            )
 
 
     # ============================================================
     # RISK MANAGEMENT
     # ============================================================
+    with st.expander("🛡️ Risk Management", expanded=False):
 
-    st.subheader("🛡️ Risk Management")
 
-    if not confirmation.get("confirmed", False):
+        if not confirmation.get("confirmed", False):
 
-        st.warning(
-            "Risk Plan: NOT GENERATED — no confirmed entry."
-        )
-
-        r1, r2, r3, r4 = st.columns(4)
-
-        with r1:
-            st.metric("Trade Status", "WAIT")
-
-        with r2:
-            st.metric("Position Size", "0 shares")
-
-        with r3:
-            st.metric(
-                "Risk Guard",
-                "ALLOWED"
-                if risk_guard.get("allowed", False)
-                else "BLOCKED",
+            st.warning(
+                "Risk Plan: NOT GENERATED — no confirmed entry."
             )
-
-        with r4:
-            st.metric(
-                "Setup Quality",
-                setup_quality["quality"],
-            )
-
-    else:
-
-        if risk_plan.get("valid", False):
 
             r1, r2, r3, r4 = st.columns(4)
 
             with r1:
-                st.metric(
-                    "Entry",
-                    f"${risk_plan['entry_price']:.2f}",
-                )
+                st.metric("Trade Status", "WAIT")
 
             with r2:
-                st.metric(
-                    "Stop Loss",
-                    f"${risk_plan['stop_loss']:.2f}",
-                )
+                st.metric("Position Size", "0 shares")
 
             with r3:
                 st.metric(
-                    "Target",
-                    f"${risk_plan['target']:.2f}",
+                    "Risk Guard",
+                    "ALLOWED"
+                    if risk_guard.get("allowed", False)
+                    else "BLOCKED",
                 )
 
             with r4:
                 st.metric(
-                    "Risk / Reward",
-                    f"1:{risk_plan['risk_reward']:.2f}",
+                    "Setup Quality",
+                    setup_quality["quality"],
                 )
-
-            p1, p2, p3, p4 = st.columns(4)
-
-            with p1:
-                st.metric(
-                    "Risk / Share",
-                    f"${risk_plan['risk_per_share']:.2f}",
-                )
-
-            with p2:
-                st.metric(
-                    "Position Size",
-                    (
-                        f"{position.get('shares', 0)} shares"
-                        if position.get("valid", False)
-                        else "0 shares"
-                    ),
-                )
-
-            with p3:
-                st.metric(
-                    "Position Value",
-                    (
-                        f"${position.get('position_value', 0):,.2f}"
-                        if position.get("valid", False)
-                        else "$0.00"
-                    ),
-                )
-
-            with p4:
-                st.metric(
-                    "Actual Risk",
-                    (
-                        f"${position.get('actual_risk', 0):,.2f}"
-                        if position.get("valid", False)
-                        else "$0.00"
-                    ),
-                )
-
-            st.caption(
-                f"Risk plan quality: {risk_plan['quality']} | "
-                f"Account risk setting: {risk_percent:.2f}% | "
-                f"Maximum position allocation: "
-                f"{max_position_percent:.2f}%"
-            )
 
         else:
 
-            st.error(
-                "Entry was confirmed, but a valid risk plan "
-                f"could not be generated: "
-                f"{risk_plan.get('reason', 'Unknown reason')}"
-            )
+            if risk_plan.get("valid", False):
+
+                r1, r2, r3, r4 = st.columns(4)
+
+                with r1:
+                    st.metric(
+                        "Entry",
+                        f"${risk_plan['entry_price']:.2f}",
+                    )
+
+                with r2:
+                    st.metric(
+                        "Stop Loss",
+                        f"${risk_plan['stop_loss']:.2f}",
+                    )
+
+                with r3:
+                    st.metric(
+                        "Target",
+                        f"${risk_plan['target']:.2f}",
+                    )
+
+                with r4:
+                    st.metric(
+                        "Risk / Reward",
+                        f"1:{risk_plan['risk_reward']:.2f}",
+                    )
+
+                p1, p2, p3, p4 = st.columns(4)
+
+                with p1:
+                    st.metric(
+                        "Risk / Share",
+                        f"${risk_plan['risk_per_share']:.2f}",
+                    )
+
+                with p2:
+                    st.metric(
+                        "Position Size",
+                        (
+                            f"{position.get('shares', 0)} shares"
+                            if position.get("valid", False)
+                            else "0 shares"
+                        ),
+                    )
+
+                with p3:
+                    st.metric(
+                        "Position Value",
+                        (
+                            f"${position.get('position_value', 0):,.2f}"
+                            if position.get("valid", False)
+                            else "$0.00"
+                        ),
+                    )
+
+                with p4:
+                    st.metric(
+                        "Actual Risk",
+                        (
+                            f"${position.get('actual_risk', 0):,.2f}"
+                            if position.get("valid", False)
+                            else "$0.00"
+                        ),
+                    )
+
+                st.caption(
+                    f"Risk plan quality: {risk_plan['quality']} | "
+                    f"Account risk setting: {risk_percent:.2f}% | "
+                    f"Maximum position allocation: "
+                    f"{max_position_percent:.2f}%"
+                )
+
+            else:
+
+                st.error(
+                    "Entry was confirmed, but a valid risk plan "
+                    f"could not be generated: "
+                    f"{risk_plan.get('reason', 'Unknown reason')}"
+                )
 
 
     # ============================================================
@@ -1014,422 +1641,422 @@ def render_live_dashboard():
     # ============================================================
     # TREND
     # ============================================================
+    with st.expander("📊 Trend", expanded=False):
 
-    st.subheader("📊 Trend")
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
 
-    with c1:
-        st.metric(
-            "EMA 9",
-            f"${row['EMA_9']:.2f}",
-        )
+        with c1:
+            st.metric(
+                "EMA 9",
+                f"${row['EMA_9']:.2f}",
+            )
 
-    with c2:
-        st.metric(
-            "EMA 20",
-            f"${row['EMA_20']:.2f}",
-        )
+        with c2:
+            st.metric(
+                "EMA 20",
+                f"${row['EMA_20']:.2f}",
+            )
 
-    with c3:
-        st.metric(
-            "EMA 50",
-            f"${row['EMA_50']:.2f}",
-        )
+        with c3:
+            st.metric(
+                "EMA 50",
+                f"${row['EMA_50']:.2f}",
+            )
 
-    with c4:
-        st.metric(
-            "SMA 50",
-            f"${row['SMA_50']:.2f}",
-        )
+        with c4:
+            st.metric(
+                "SMA 50",
+                f"${row['SMA_50']:.2f}",
+            )
 
-    with c5:
-        st.metric(
-            "SMA 200",
-            f"${row['SMA_200']:.2f}",
-        )
+        with c5:
+            st.metric(
+                "SMA 200",
+                f"${row['SMA_200']:.2f}",
+            )
 
-    with c6:
-        st.metric(
-            "VWAP",
-            f"${row['VWAP']:.2f}",
-        )
+        with c6:
+            st.metric(
+                "VWAP",
+                f"${row['VWAP']:.2f}",
+            )
 
 
     # ============================================================
     # MOMENTUM
     # ============================================================
+    with st.expander("⚡ Momentum", expanded=False):
 
-    st.subheader("⚡ Momentum")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5 = st.columns(5)
 
-    with c1:
-        st.metric(
-            "RSI 14",
-            f"{row['RSI_14']:.2f}",
-        )
+        with c1:
+            st.metric(
+                "RSI 14",
+                f"{row['RSI_14']:.2f}",
+            )
 
-    with c2:
-        st.metric(
-            "MACD",
-            f"{row['MACD']:.4f}",
-        )
+        with c2:
+            st.metric(
+                "MACD",
+                f"{row['MACD']:.4f}",
+            )
 
-    with c3:
-        st.metric(
-            "MACD Signal",
-            f"{row['MACD_SIGNAL']:.4f}",
-        )
+        with c3:
+            st.metric(
+                "MACD Signal",
+                f"{row['MACD_SIGNAL']:.4f}",
+            )
 
-    with c4:
-        st.metric(
-            "Stochastic %K",
-            f"{row['STOCH_K']:.2f}",
-        )
+        with c4:
+            st.metric(
+                "Stochastic %K",
+                f"{row['STOCH_K']:.2f}",
+            )
 
-    with c5:
-        st.metric(
-            "Stochastic %D",
-            f"{row['STOCH_D']:.2f}",
-        )
+        with c5:
+            st.metric(
+                "Stochastic %D",
+                f"{row['STOCH_D']:.2f}",
+            )
 
 
     # ============================================================
     # BOLLINGER BANDS
     # ============================================================
+    with st.expander("📏 Bollinger Bands", expanded=False):
 
-    st.subheader("📏 Bollinger Bands")
 
-    bb1, bb2, bb3, bb4 = st.columns(4)
+        bb1, bb2, bb3, bb4 = st.columns(4)
 
-    with bb1:
-        st.metric("Upper Band", f"${row['BB_UPPER']:.2f}")
+        with bb1:
+            st.metric("Upper Band", f"${row['BB_UPPER']:.2f}")
 
-    with bb2:
-        st.metric("Middle Band", f"${row['BB_MIDDLE']:.2f}")
+        with bb2:
+            st.metric("Middle Band", f"${row['BB_MIDDLE']:.2f}")
 
-    with bb3:
-        st.metric("Lower Band", f"${row['BB_LOWER']:.2f}")
+        with bb3:
+            st.metric("Lower Band", f"${row['BB_LOWER']:.2f}")
 
-    with bb4:
-        st.metric("%B", f"{row['BB_PERCENT_B']:.2f}")
+        with bb4:
+            st.metric("%B", f"{row['BB_PERCENT_B']:.2f}")
 
-    bb5, bb6, bb7 = st.columns(3)
+        bb5, bb6, bb7 = st.columns(3)
 
-    with bb5:
-        st.metric("Band Width", f"{row['BB_WIDTH']:.2f}%")
+        with bb5:
+            st.metric("Band Width", f"{row['BB_WIDTH']:.2f}%")
 
-    with bb6:
-        st.metric(
-            "BB Signal",
-            bollinger_analysis.get("signal", "UNKNOWN"),
-        )
+        with bb6:
+            st.metric(
+                "BB Signal",
+                bollinger_analysis.get("signal", "UNKNOWN"),
+            )
 
-    with bb7:
-        st.metric(
-            "Price Position",
-            bollinger_analysis.get("position", "UNKNOWN"),
-        )
+        with bb7:
+            st.metric(
+                "Price Position",
+                bollinger_analysis.get("position", "UNKNOWN"),
+            )
 
-    for reason in bollinger_analysis.get("reasons", []):
-        st.write(f"• {reason}")
+        for reason in bollinger_analysis.get("reasons", []):
+            st.write(f"• {reason}")
 
-    for warning in bollinger_analysis.get("warnings", []):
-        st.warning(warning)
+        for warning in bollinger_analysis.get("warnings", []):
+            st.warning(warning)
 
 
     # ============================================================
     # RSI DIVERGENCE
     # ============================================================
+    with st.expander("🔀 RSI Divergence", expanded=False):
 
-    st.subheader("🔀 RSI Divergence")
 
-    d1, d2, d3 = st.columns(3)
+        d1, d2, d3 = st.columns(3)
 
-    divergence_type = rsi_divergence.get(
-        "divergence",
-        "NONE",
-    )
-
-    divergence_direction = rsi_divergence.get(
-        "direction",
-        "NEUTRAL",
-    )
-
-    divergence_confidence = rsi_divergence.get(
-        "confidence",
-        0,
-    )
-
-    with d1:
-        st.metric(
-            "Divergence",
-            divergence_type,
+        divergence_type = rsi_divergence.get(
+            "divergence",
+            "NONE",
         )
 
-    with d2:
-        st.metric(
-            "Direction",
-            divergence_direction,
+        divergence_direction = rsi_divergence.get(
+            "direction",
+            "NEUTRAL",
         )
 
-    with d3:
-        st.metric(
-            "Confidence",
-            f"{divergence_confidence}%",
+        divergence_confidence = rsi_divergence.get(
+            "confidence",
+            0,
         )
 
-    price_point_1 = rsi_divergence.get("price_point_1")
-    price_point_2 = rsi_divergence.get("price_point_2")
-    rsi_point_1 = rsi_divergence.get("rsi_point_1")
-    rsi_point_2 = rsi_divergence.get("rsi_point_2")
-
-    if (
-        price_point_1 is not None
-        and price_point_2 is not None
-        and rsi_point_1 is not None
-        and rsi_point_2 is not None
-    ):
-
-        dp1, dp2 = st.columns(2)
-
-        with dp1:
-            st.write(
-                f"**Price Swing:** "
-                f"${price_point_1:.2f} → "
-                f"${price_point_2:.2f}"
+        with d1:
+            st.metric(
+                "Divergence",
+                divergence_type,
             )
 
-            st.write(
-                f"**RSI Swing:** "
-                f"{rsi_point_1:.2f} → "
-                f"{rsi_point_2:.2f}"
+        with d2:
+            st.metric(
+                "Direction",
+                divergence_direction,
             )
 
-        with dp2:
-            if rsi_divergence.get("time_point_1") is not None:
+        with d3:
+            st.metric(
+                "Confidence",
+                f"{divergence_confidence}%",
+            )
+
+        price_point_1 = rsi_divergence.get("price_point_1")
+        price_point_2 = rsi_divergence.get("price_point_2")
+        rsi_point_1 = rsi_divergence.get("rsi_point_1")
+        rsi_point_2 = rsi_divergence.get("rsi_point_2")
+
+        if (
+            price_point_1 is not None
+            and price_point_2 is not None
+            and rsi_point_1 is not None
+            and rsi_point_2 is not None
+        ):
+
+            dp1, dp2 = st.columns(2)
+
+            with dp1:
                 st.write(
-                    f"**Swing Time 1:** "
-                    f"{rsi_divergence['time_point_1']}"
+                    f"**Price Swing:** "
+                    f"${price_point_1:.2f} → "
+                    f"${price_point_2:.2f}"
                 )
 
-            if rsi_divergence.get("time_point_2") is not None:
                 st.write(
-                    f"**Swing Time 2:** "
-                    f"{rsi_divergence['time_point_2']}"
+                    f"**RSI Swing:** "
+                    f"{rsi_point_1:.2f} → "
+                    f"{rsi_point_2:.2f}"
                 )
 
-        if divergence_type == "REGULAR_BULLISH":
+            with dp2:
+                if rsi_divergence.get("time_point_1") is not None:
+                    st.write(
+                        f"**Swing Time 1:** "
+                        f"{rsi_divergence['time_point_1']}"
+                    )
+
+                if rsi_divergence.get("time_point_2") is not None:
+                    st.write(
+                        f"**Swing Time 2:** "
+                        f"{rsi_divergence['time_point_2']}"
+                    )
+
+            if divergence_type == "REGULAR_BULLISH":
+                st.info(
+                    "Bullish RSI divergence detected: price made a "
+                    "lower swing low while RSI made a higher swing low. "
+                    "This may indicate weakening downside momentum. "
+                    "Entry confirmation is still required."
+                )
+
+            elif divergence_type == "REGULAR_BEARISH":
+                st.warning(
+                    "Bearish RSI divergence detected: price made a "
+                    "higher swing high while RSI made a lower swing high. "
+                    "This may indicate weakening upside momentum. "
+                    "Entry confirmation is still required."
+                )
+
+        else:
             st.info(
-                "Bullish RSI divergence detected: price made a "
-                "lower swing low while RSI made a higher swing low. "
-                "This may indicate weakening downside momentum. "
-                "Entry confirmation is still required."
+                "No regular RSI divergence is currently detected."
             )
 
-        elif divergence_type == "REGULAR_BEARISH":
-            st.warning(
-                "Bearish RSI divergence detected: price made a "
-                "higher swing high while RSI made a lower swing high. "
-                "This may indicate weakening upside momentum. "
-                "Entry confirmation is still required."
-            )
-
-    else:
-        st.info(
-            "No regular RSI divergence is currently detected."
+        divergence_reasons = rsi_divergence.get(
+            "reasons",
+            [],
         )
 
-    divergence_reasons = rsi_divergence.get(
-        "reasons",
-        [],
-    )
-
-    if divergence_reasons:
-        with st.expander("RSI Divergence Details"):
-            for reason in divergence_reasons:
-                st.write(f"• {reason}")
+        if divergence_reasons:
+            with st.expander("RSI Divergence Details"):
+                for reason in divergence_reasons:
+                    st.write(f"• {reason}")
 
 
     # ============================================================
     # ON-BALANCE VOLUME
     # ============================================================
+    with st.expander("🌊 On-Balance Volume (OBV)", expanded=False):
 
-    st.subheader("🌊 On-Balance Volume (OBV)")
 
-    o1, o2, o3, o4 = st.columns(4)
+        o1, o2, o3, o4 = st.columns(4)
 
-    with o1:
-        st.metric("OBV", f"{row['OBV']:,.0f}")
+        with o1:
+            st.metric("OBV", f"{row['OBV']:,.0f}")
 
-    with o2:
-        st.metric("OBV Signal", f"{row['OBV_SIGNAL']:,.0f}")
+        with o2:
+            st.metric("OBV Signal", f"{row['OBV_SIGNAL']:,.0f}")
 
-    with o3:
-        st.metric("OBV Change", f"{row['OBV_CHANGE']:+,.0f}")
+        with o3:
+            st.metric("OBV Change", f"{row['OBV_CHANGE']:+,.0f}")
 
-    with o4:
-        st.metric(
-            "Volume Direction",
-            obv_analysis.get("direction", "NEUTRAL"),
+        with o4:
+            st.metric(
+                "Volume Direction",
+                obv_analysis.get("direction", "NEUTRAL"),
+            )
+
+        st.write(
+            f"**Signal:** {obv_analysis.get('signal', 'UNKNOWN')}  |  "
+            f"**Confidence:** {obv_analysis.get('confidence', 0)}%"
         )
 
-    st.write(
-        f"**Signal:** {obv_analysis.get('signal', 'UNKNOWN')}  |  "
-        f"**Confidence:** {obv_analysis.get('confidence', 0)}%"
-    )
+        for reason in obv_analysis.get("reasons", []):
+            st.write(f"• {reason}")
 
-    for reason in obv_analysis.get("reasons", []):
-        st.write(f"• {reason}")
-
-    for warning in obv_analysis.get("warnings", []):
-        st.warning(warning)
+        for warning in obv_analysis.get("warnings", []):
+            st.warning(warning)
 
 
     # ============================================================
     # TREND STRENGTH / VOLUME
     # ============================================================
+    with st.expander("💪 Trend Strength / Volume", expanded=False):
 
-    st.subheader("💪 Trend Strength / Volume")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5 = st.columns(5)
 
-    with c1:
-        st.metric(
-            "ATR 14",
-            f"{row['ATR_14']:.2f}",
-        )
+        with c1:
+            st.metric(
+                "ATR 14",
+                f"{row['ATR_14']:.2f}",
+            )
 
-    with c2:
-        st.metric(
-            "ADX 14",
-            f"{row['ADX_14']:.2f}",
-        )
+        with c2:
+            st.metric(
+                "ADX 14",
+                f"{row['ADX_14']:.2f}",
+            )
 
-    with c3:
-        st.metric(
-            "DI+",
-            f"{row['DI_PLUS_14']:.2f}",
-        )
+        with c3:
+            st.metric(
+                "DI+",
+                f"{row['DI_PLUS_14']:.2f}",
+            )
 
-    with c4:
-        st.metric(
-            "DI-",
-            f"{row['DI_MINUS_14']:.2f}",
-        )
+        with c4:
+            st.metric(
+                "DI-",
+                f"{row['DI_MINUS_14']:.2f}",
+            )
 
-    with c5:
-        st.metric(
-            "Relative Volume",
-            f"{row['RELATIVE_VOLUME']:.2f}x",
-        )
+        with c5:
+            st.metric(
+                "Relative Volume",
+                f"{row['RELATIVE_VOLUME']:.2f}x",
+            )
 
 
     # ============================================================
     # SETUP REASONS
     # ============================================================
-
-    st.subheader("🔎 Setup Analysis")
-
-    reason_col, warning_col = st.columns(2)
+    with st.expander("🔎 Setup Analysis", expanded=False):
 
 
-    with reason_col:
-
-        st.markdown("### Evidence")
-
-        for reason in setup.get(
-            "reasons",
-            [],
-        ):
-
-            st.write(
-                f"✅ {reason}"
-            )
+        reason_col, warning_col = st.columns(2)
 
 
-    with warning_col:
+        with reason_col:
 
-        st.markdown("### Warnings")
+            st.markdown("### Evidence")
 
-        warnings = (
-            setup.get("warnings", [])
-            + pullback.get("warnings", [])
-            + confirmation.get("warnings", [])
-        )
-
-        if warnings:
-
-            for warning in warnings:
+            for reason in setup.get(
+                "reasons",
+                [],
+            ):
 
                 st.write(
-                    f"⚠️ {warning}"
+                    f"✅ {reason}"
                 )
 
-        else:
 
-            st.success(
-                "No major warnings"
+        with warning_col:
+
+            st.markdown("### Warnings")
+
+            warnings = (
+                setup.get("warnings", [])
+                + pullback.get("warnings", [])
+                + confirmation.get("warnings", [])
             )
+
+            if warnings:
+
+                for warning in warnings:
+
+                    st.write(
+                        f"⚠️ {warning}"
+                    )
+
+            else:
+
+                st.success(
+                    "No major warnings"
+                )
 
 
     # ============================================================
     # PULLBACK ANALYSIS
     # ============================================================
+    with st.expander("↩️ Pullback Analysis", expanded=False):
 
-    st.subheader("↩️ Pullback Analysis")
-
-    st.write(
-        f"**Type:** {pullback['type']}"
-    )
-
-    st.write(
-        f"**Confidence:** "
-        f"{pullback['confidence']}%"
-    )
-
-    for reason in pullback.get(
-        "reasons",
-        [],
-    ):
 
         st.write(
-            f"• {reason}"
+            f"**Type:** {pullback['type']}"
         )
+
+        st.write(
+            f"**Confidence:** "
+            f"{pullback['confidence']}%"
+        )
+
+        for reason in pullback.get(
+            "reasons",
+            [],
+        ):
+
+            st.write(
+                f"• {reason}"
+            )
 
 
     # ============================================================
     # ENTRY CONFIRMATION
     # ============================================================
+    with st.expander("🚦 Entry Confirmation", expanded=False):
 
-    st.subheader("🚦 Entry Confirmation")
 
-    if confirmation["decision"] == "NO_ENTRY":
+        if confirmation["decision"] == "NO_ENTRY":
 
-        st.error(
-            "NO ENTRY — confirmation conditions are not satisfied."
-        )
+            st.error(
+                "NO ENTRY — confirmation conditions are not satisfied."
+            )
 
-    else:
+        else:
 
-        st.success(
-            confirmation["decision"]
-        )
-
-    st.write(
-        f"**Confidence:** "
-        f"{confirmation['confidence']}%"
-    )
-
-    for reason in confirmation.get(
-        "reasons",
-        [],
-    ):
+            st.success(
+                confirmation["decision"]
+            )
 
         st.write(
-            f"• {reason}"
+            f"**Confidence:** "
+            f"{confirmation['confidence']}%"
         )
+
+        for reason in confirmation.get(
+            "reasons",
+            [],
+        ):
+
+            st.write(
+                f"• {reason}"
+            )
 
 
 
@@ -1437,34 +2064,35 @@ def render_live_dashboard():
     # SIGNAL CHANGE HISTORY
     # ========================================================
 
-    st.subheader("🕒 Signal Change History")
+    with st.expander("🕒 Signal Change History", expanded=False):
 
-    history_rows = [
-        {
-            "Candle Time": item["time"],
-            "Price": item["price"],
-            "Decision": item["decision"],
-            "Direction": item["direction"],
-            "Setup": item["setup"],
-            "Entry": item["entry"],
-            "Confidence": item["confidence"],
-        }
-        for item in reversed(ticker_history[-10:])
-    ]
+        history_rows = [
+            {
+                "Candle Time": item["time"],
+                "Price": item["price"],
+                "Decision": item["decision"],
+                "Direction": item["direction"],
+                "Setup": item["setup"],
+                "Entry": item["entry"],
+                "Confidence": item["confidence"],
+            }
+            for item in reversed(ticker_history[-10:])
+        ]
 
-    if history_rows:
-        st.dataframe(
-            pd.DataFrame(history_rows),
-            use_container_width=True,
-            hide_index=True,
+        if history_rows:
+            st.dataframe(
+                pd.DataFrame(history_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("No signal changes recorded yet.")
+
+        st.caption(
+            "A row is added only when the final decision, setup, "
+            "direction, or entry state changes."
         )
-    else:
-        st.info("No signal changes recorded yet.")
 
-    st.caption(
-        "A row is added only when the final decision, setup, "
-        "direction, or entry state changes."
-    )
 
     # ============================================================
     # RAW DATA
@@ -1862,6 +2490,49 @@ def render_help_page():
             f"Change {obv_change:+,.0f}, {obv_signal_name})"
         )
 
+        current_mtf = latest.get("multi_timeframe")
+
+        if current_mtf:
+            current_target = current_mtf.get("target", {})
+
+            st.markdown("### Move Toward 200-Day SMA")
+
+            if current_target.get("available", False):
+                target_score = current_target.get("score")
+                target_outlook = current_target.get("outlook", "UNKNOWN")
+                target_location = current_target.get("location", "N/A")
+                target_percent = current_target.get("percent")
+
+                st.write(
+                    f"**Current assessment:** {target_outlook}  |  "
+                    f"**Technical Support Score:** {target_score}/100  |  "
+                    f"**200-Day SMA Location:** {target_location}"
+                )
+
+                if target_percent is not None:
+                    relation = (
+                        "above" if target_percent > 0
+                        else "below" if target_percent < 0
+                        else "at"
+                    )
+                    st.write(
+                        f"The 200-day SMA is {abs(target_percent):.2f}% "
+                        f"{relation} the current price."
+                    )
+
+                st.caption(
+                    "This asks whether the current 4H setup, including trend, "
+                    "momentum, MSB, Order Block, Support/Resistance and breakout "
+                    "context, with 1H and Daily confirmation, supports movement "
+                    "toward the 200-day SMA. The score is technical confluence, "
+                    "not a probability."
+                )
+            else:
+                st.write(
+                    "**Current assessment:** NOT AVAILABLE — there is not "
+                    "enough daily history for a valid 200-day SMA analysis."
+                )
+
         st.markdown("### Current price performance")
 
         perf_cols = st.columns(3)
@@ -2160,6 +2831,102 @@ AI-Trader currently treats divergence as supporting information, not a standalon
 The absolute OBV number is less important than its direction and relationship
 to its recent moving average. AI-Trader uses OBV as supporting evidence rather
 than as a standalone BUY or SELL signal.
+""")
+
+    st.subheader("🧱 Support / Resistance & Breakouts")
+
+    with st.expander("Support / Resistance"):
+        st.markdown("""
+- **Support:** a price area built from clustered confirmed swing lows.
+- **Resistance:** a price area built from clustered confirmed swing highs.
+- The compact **S/R** column shows `Support / Resistance` in one place.
+- **INSIDE_RANGE:** current price is between detected support and resistance.
+- **ABOVE_RESISTANCE:** current price is above detected resistance.
+- **BELOW_SUPPORT:** current price is below detected support.
+- **Touch count:** how many confirmed swing points contributed to the level.
+- **Confidence:** a rule-based structural score based mainly on repeated touches and breakout context; it is not a probability.
+""")
+
+    with st.expander("Breakout / Breakdown"):
+        st.markdown("""
+- **BULLISH_BREAKOUT:** the latest close is above detected resistance.
+- **BEARISH_BREAKDOWN:** the latest close is below detected support.
+- **NONE:** price remains inside the detected support/resistance range.
+
+AI-Trader requires a **close** beyond the level rather than only a wick through it.
+The detector is currently display-only and does not yet change BUY/SELL decisions.
+""")
+
+    st.subheader("🏗️ Market Structure / Order Blocks")
+
+    with st.expander("MSB — Market Structure Break"):
+        st.markdown("""
+- **BULLISH_MSB:** price closed above a previously confirmed swing high.
+- **BEARISH_MSB:** price closed below a previously confirmed swing low.
+- **MSB Level:** the exact prior swing high/low that price broke to create the MSB.
+- **NONE:** no confirmed break was found in the current lookback window.
+- The displayed confidence describes the strength of the detected break under AI-Trader's current rules; it is not a probability of future price movement.
+
+AI-Trader calculates MSB separately for the **1 Hour, 4 Hour and Daily** candles.
+""")
+
+    with st.expander("Order Block (OB)"):
+        st.markdown("""
+After a confirmed MSB, AI-Trader identifies a **candidate order block**:
+
+- After a **bullish MSB**, the last bearish candle before the break is treated as a candidate **BULLISH_OB**.
+- After a **bearish MSB**, the last bullish candle before the break is treated as a candidate **BEARISH_OB**.
+- **OB Zone** shows that candle's High-to-Low price range.
+- **ABOVE_OB:** current price is above the zone.
+- **BELOW_OB:** current price is below the zone.
+- **INSIDE_OB:** current price is currently trading inside the zone.
+- **OB Revisited = YES:** price has traded back into that zone after the structure break.
+- **ACTIVE:** the zone has not yet been revisited or invalidated.
+- **RETESTED:** price revisited the zone, but the zone still remains valid.
+- **INVALIDATED:** a bullish OB later closed below its zone low, or a bearish OB later closed above its zone high.
+
+Invalidated order blocks are no longer allowed to contribute directional support to the 200-day SMA confluence score.
+
+This is a rule-based candidate order block, not proof of institutional buying or selling. We will add stronger filters later if testing shows they are useful.
+""")
+
+    st.subheader("🧭 Multi-Timeframe & Strategic Levels")
+
+    with st.expander("Move Toward 200-Day SMA / Technical Support Score"):
+        st.write(
+            "This asks whether the current technical setup supports movement "
+            "toward the 200-day simple moving average (SMA), mainly using the "
+            "4-hour chart with 1-hour and Daily confirmation."
+        )
+        st.markdown("""
+- **STRONGLY SUPPORTED:** most technical evidence supports movement toward the 200-day SMA.
+- **POSSIBLE:** reasonable support exists, but confirmation is not as strong.
+- **MIXED:** supporting and opposing evidence conflict.
+- **LOW SUPPORT:** current technical evidence mostly does not support movement toward the 200-day SMA.
+- **AT TARGET:** price is already approximately at the 200-day SMA.
+- **NOT AVAILABLE:** insufficient daily history to calculate a valid 200-day SMA.
+
+**Technical Support Score**
+- Combines 4H MA trend, RSI, Stochastic, MACD, ADX/DI, **4H MSB, 4H Order Block direction/position, 4H Support/Resistance and confirmed breakout/breakdown**, 1H confirmation, Daily trend and target distance.
+- A confirmed 4H breakout/breakdown has more weight than simple proximity to support or resistance.
+- 4H MSB still carries more weight than OB position because a confirmed structure break is stronger evidence than location relative to a candidate order block.
+- It is a **confluence score, not a probability**. A score of 75/100 does not mean a 75% chance of reaching the SMA.
+
+**200-Day SMA Location**
+- **ABOVE PRICE:** the SMA is above current price.
+- **BELOW PRICE:** the SMA is below current price.
+- **AT PRICE:** current price is approximately at the SMA.
+
+Location describes where the SMA is; it is not itself a prediction.
+""")
+
+    with st.expander("50 / 200-Day Strategic Levels"):
+        st.markdown("""
+- **50-Day SMA:** average closing price over the latest 50 valid daily candles.
+- **200-Day SMA:** average closing price over the latest 200 valid daily candles.
+- **50-Day High / Low:** highest high and lowest low over the latest 50 valid daily candles.
+- **200-Day High / Low:** highest high and lowest low over the latest 200 valid daily candles.
+- AI-Trader displays **N/A** when enough history is not available.
 """)
 
     st.subheader("🎯 AI-Trader Decision Terms")
