@@ -144,8 +144,7 @@ def _fetch_history_once(ticker_symbol, period, interval):
             interval=interval,
             auto_adjust=False,
             actions=False,
-            prepost=False,
-            repair=True,
+            prepost=False
         )
         history = _normalize_history(history)
 
@@ -162,7 +161,6 @@ def _fetch_history_once(ticker_symbol, period, interval):
             auto_adjust=False,
             actions=False,
             prepost=False,
-            repair=True,
             progress=False,
             threads=False,
         )
