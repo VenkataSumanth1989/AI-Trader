@@ -162,7 +162,7 @@ def _fetch_history_once(ticker_symbol, period, interval):
             actions=False,
             prepost=False,
             progress=False,
-            threads=False,
+            threads=False
         )
         history = _normalize_history(history)
 
