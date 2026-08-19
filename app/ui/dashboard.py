@@ -25,6 +25,7 @@ from app.config import DEFAULT_TICKER
 from app.market_data.stock_data import (
     get_historical_data,
     get_multi_timeframe_data,
+    get_data_freshness,
 )
 
 from app.indicators.technical import (
@@ -46,6 +47,11 @@ from app.strategies.pullback_detector import (
 
 from app.strategies.entry_confirmation import (
     confirm_entry,
+)
+
+from app.strategies.trade_state import (
+    initial_trade_state,
+    update_trade_state,
 )
 
 from app.strategies.setup_quality import (
@@ -362,6 +368,39 @@ else:
 
 
 # ============================================================
+# CLOSED-CANDLE HELPER
+# ============================================================
+
+def get_last_completed_candle_index(data, interval_minutes=5):
+    """
+    Return the most recent completed intraday candle.
+
+    Yahoo timestamps intraday bars at their start time. If the latest bar
+    is still forming, use the previous bar for setup/entry decisions.
+    """
+    if data is None or data.empty:
+        raise ValueError("No intraday candles available.")
+
+    latest_index = data.index[-1]
+    latest_ts = pd.Timestamp(latest_index)
+
+    if latest_ts.tzinfo is None:
+        now = pd.Timestamp.now()
+    else:
+        now = pd.Timestamp.now(tz=latest_ts.tz)
+
+    completion_time = latest_ts + pd.Timedelta(minutes=interval_minutes)
+
+    if now >= completion_time:
+        return latest_index
+
+    if len(data) < 2:
+        raise ValueError("Not enough candles to identify a completed candle.")
+
+    return data.index[-2]
+
+
+# ============================================================
 # ANALYSIS FUNCTION
 # ============================================================
 
@@ -391,19 +430,31 @@ def analyze_stock(ticker_symbol):
         interval="5m",
     )
 
+    data_freshness = get_data_freshness(
+        data,
+        interval="5m",
+    )
+
     data = add_technical_indicators(data)
     data = add_advanced_indicators(data)
     data = add_bollinger_bands(data)
     data = add_obv(data)
 
-    row = data.iloc[-1].copy()
+    live_row = data.iloc[-1].copy()
+    closed_candle_index = get_last_completed_candle_index(
+        data,
+        interval_minutes=5,
+    )
+    row = data.loc[closed_candle_index].copy()
 
-    # Add daily trend indicators
+    # Add daily trend indicators to both contexts.
     row["SMA_50"] = daily_latest["SMA_50"]
     row["SMA_200"] = daily_latest["SMA_200"]
+    live_row["SMA_50"] = daily_latest["SMA_50"]
+    live_row["SMA_200"] = daily_latest["SMA_200"]
 
     # --------------------------------------------------------
-    # SETUP
+    # SETUP — COMPLETED 5-MINUTE CANDLE ONLY
     # --------------------------------------------------------
 
     setup = detect_setup(row)
@@ -456,6 +507,9 @@ def analyze_stock(ticker_symbol):
         rsi_divergence,
         bollinger_analysis,
         obv_analysis,
+        live_row,
+        closed_candle_index,
+        data_freshness,
     )
 
 
@@ -893,6 +947,9 @@ def render_live_dashboard():
                 rsi_divergence,
                 bollinger_analysis,
                 obv_analysis,
+                live_row,
+                closed_candle_index,
+                data_freshness,
             ) = analyze_stock(current_ticker)
 
             multi_timeframe = calculate_multi_timeframe_analysis(
@@ -975,6 +1032,29 @@ def render_live_dashboard():
 
 
     # ========================================================
+    # CLOSED-CANDLE TRADE STATE / SIGNAL PERSISTENCE
+    # ========================================================
+
+    if "trade_states" not in st.session_state:
+        st.session_state["trade_states"] = {}
+
+    previous_trade_state = st.session_state["trade_states"].get(
+        analyzed_ticker,
+        initial_trade_state(),
+    )
+
+    trade_state = update_trade_state(
+        previous_state=previous_trade_state,
+        confirmation=confirmation,
+        closed_candle_time=closed_candle_index,
+        keep_threshold=60,
+        required_confirmations=2,
+    )
+
+    st.session_state["trade_states"][analyzed_ticker] = trade_state
+
+
+    # ========================================================
     # SAVE LATEST ANALYSIS FOR CONTEXT-AWARE HELP
     # ========================================================
 
@@ -992,6 +1072,10 @@ def render_live_dashboard():
         "risk_guard": risk_guard,
         "final_decision": final_decision,
         "multi_timeframe": multi_timeframe,
+        "trade_state": trade_state,
+        "live_price": float(live_row["Close"]),
+        "closed_candle_time": str(closed_candle_index),
+        "data_freshness": data_freshness,
     }
 
 
@@ -1008,9 +1092,9 @@ def render_live_dashboard():
     )
 
     current_signature = (
-        final_decision.get("decision", "WAIT"),
+        trade_state.get("state", "WAITING"),
+        trade_state.get("direction", "NONE"),
         setup.get("setup", "NO_SETUP"),
-        setup.get("direction", "NEUTRAL"),
         confirmation.get("decision", "NO_ENTRY"),
     )
 
@@ -1023,9 +1107,9 @@ def render_live_dashboard():
     if current_signature != previous_signature:
         ticker_history.append(
             {
-                "time": str(data.index[-1]),
+                "time": str(closed_candle_index),
                 "price": round(float(row["Close"]), 2),
-                "decision": final_decision.get("decision", "WAIT"),
+                "decision": trade_state.get("state", "WAITING"),
                 "direction": setup.get("direction", "NEUTRAL"),
                 "setup": setup.get("setup", "NO_SETUP"),
                 "entry": confirmation.get("decision", "NO_ENTRY"),
@@ -1038,10 +1122,38 @@ def render_live_dashboard():
             del ticker_history[:-50]
 
     st.caption(
-        f"AI candle: {data.index[-1]}  •  "
+        f"Decision candle (closed): {closed_candle_index}  •  "
+        f"Latest market candle: {data.index[-1]}  •  "
         f"Refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  •  "
         f"Auto refresh: {'ON (5 min)' if auto_refresh else 'OFF'}"
     )
+
+    # ============================================================
+    # MARKET DATA FRESHNESS
+    # ============================================================
+
+    freshness_status = data_freshness.get("status", "UNKNOWN")
+    latest_market_candle = data_freshness.get("latest_candle")
+    candle_age = data_freshness.get("age_minutes")
+    market_session = data_freshness.get("session", "UNKNOWN")
+
+    if freshness_status == "LIVE":
+        st.success(
+            "🟢 LIVE DATA — "
+            f"latest 5-minute candle: {latest_market_candle}  •  "
+            f"age: {candle_age:.1f} min  •  session: {market_session}"
+        )
+    elif freshness_status == "MARKET_CLOSED":
+        st.info(
+            "⚪ MARKET CLOSED — "
+            f"latest available candle: {latest_market_candle}  •  "
+            f"session: {market_session}"
+        )
+    else:
+        st.error(
+            "🔴 STALE / UNKNOWN MARKET DATA — analysis should not be trusted. "
+            f"Latest candle: {latest_market_candle}"
+        )
 
     # ============================================================
     # TOP SUMMARY
@@ -1063,8 +1175,8 @@ def render_live_dashboard():
     with col2:
 
         st.metric(
-            "Price",
-            f"${row['Close']:.2f}",
+            "Live Price",
+            f"${live_row['Close']:.2f}",
         )
 
 
@@ -1079,9 +1191,69 @@ def render_live_dashboard():
     with col4:
 
         st.metric(
-            "Confidence",
+            "Setup Confidence",
             f"{setup['confidence']}%",
         )
+
+
+    # ============================================================
+    # TRADE STATE — CLOSED-CANDLE BASED
+    # ============================================================
+
+    st.subheader("🛰️ Market Data Freshness")
+
+    with st.expander("LIVE / MARKET CLOSED / STALE DATA"):
+        st.markdown("""
+AI-Trader checks the timestamp of the latest intraday candle before calculating signals.
+
+- **LIVE DATA:** the newest 5-minute candle is recent enough for regular market hours.
+- **MARKET CLOSED:** regular US market hours are over, so the latest completed candle may be from the prior session.
+- **STALE DATA:** Yahoo Finance returned data that is too old during regular market hours.
+
+When data is stale, the market-data layer raises an error instead of silently calculating indicators from yesterday's price. The app also retries Yahoo Finance and compares two yfinance fetch paths, preferring whichever returns the newest candle.
+""")
+
+    st.subheader("🚦 Closed-Candle Trade State")
+
+    s1, s2, s3, s4 = st.columns(4)
+
+    trade_state_name = trade_state.get("state", "WAITING")
+
+    with s1:
+        if trade_state_name == "ENTRY_READY":
+            st.success("🟢 ENTRY READY")
+        elif trade_state_name == "CANDIDATE":
+            st.warning("🟠 CANDIDATE")
+        elif trade_state_name == "INVALIDATED":
+            st.error("🔴 INVALIDATED")
+        else:
+            st.info("🟡 WAITING")
+
+    with s2:
+        st.metric(
+            "Entry Direction",
+            trade_state.get("direction", "NONE"),
+        )
+
+    with s3:
+        st.metric(
+            "Entry Confidence",
+            f"{trade_state.get('confidence', 0)}%",
+        )
+
+    with s4:
+        st.metric(
+            "Closed-Candle Confirmations",
+            (
+                f"{trade_state.get('consecutive_confirmations', 0)}"
+                f"/{trade_state.get('required_confirmations', 2)}"
+            ),
+        )
+
+    st.caption(
+        f"{trade_state.get('reason', '')}. Decisions update only on completed "
+        "5-minute candles; live price can move without flipping the trade state."
+    )
 
 
     # ============================================================
@@ -2927,6 +3099,26 @@ Location describes where the SMA is; it is not itself a prediction.
 - **50-Day High / Low:** highest high and lowest low over the latest 50 valid daily candles.
 - **200-Day High / Low:** highest high and lowest low over the latest 200 valid daily candles.
 - AI-Trader displays **N/A** when enough history is not available.
+""")
+
+    st.subheader("🚦 Closed-Candle Trade State")
+
+    with st.expander("WAITING / CANDIDATE / ENTRY READY / INVALIDATED"):
+        st.markdown("""
+AI-Trader separates **live price movement** from the **trade decision**.
+
+- **WAITING:** no completed 5-minute candle has confirmed the entry.
+- **CANDIDATE:** one completed candle has confirmed the same entry direction.
+- **ENTRY READY:** two consecutive completed 5-minute candles confirmed the same direction.
+- **INVALIDATED:** an existing ENTRY READY signal lost sufficient closed-candle strength or changed direction.
+
+**Why this matters**
+- The current 5-minute candle can move rapidly and make RSI, MACD and other indicators fluctuate.
+- AI-Trader therefore uses the **last completed 5-minute candle** for setup and entry confirmation.
+- Live price is still displayed separately.
+- Once ENTRY READY, a small confidence drop does not instantly cancel the signal. The current keep threshold is **60%**.
+
+This reduces rapid `BUY → WAIT → BUY → WAIT` behavior caused by an unfinished candle.
 """)
 
     st.subheader("🎯 AI-Trader Decision Terms")
