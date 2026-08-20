@@ -54,6 +54,10 @@ from app.strategies.trade_state import (
     update_trade_state,
 )
 
+from app.strategies.trade_plan import (
+    build_trade_plan,
+)
+
 from app.strategies.setup_quality import (
     calculate_setup_quality,
 )
@@ -1161,6 +1165,13 @@ def render_live_dashboard():
         trade_state=trade_state,
     )
 
+    trade_plan = build_trade_plan(
+        swing_outlook=swing_outlook,
+        trade_state=trade_state,
+        row=row,
+        multi_timeframe=multi_timeframe,
+    )
+
 
     # ========================================================
     # SAVE LATEST ANALYSIS FOR CONTEXT-AWARE HELP
@@ -1185,6 +1196,7 @@ def render_live_dashboard():
         "closed_candle_time": str(closed_candle_index),
         "data_freshness": data_freshness,
         "swing_outlook": swing_outlook,
+        "trade_plan": trade_plan,
     }
 
 
@@ -1353,6 +1365,69 @@ def render_live_dashboard():
         f"Action: {swing_outlook.get('action', 'NO SWING ENTRY YET')}. "
         "Bias tells you which side to watch; Trade State tells you when."
     )
+
+    st.markdown("#### 📋 Trade Plan")
+
+    tp1, tp2, tp3, tp4, tp5 = st.columns(5)
+    plan_status = trade_plan.get("status", "NO_SETUP")
+
+    with tp1:
+        if plan_status == "READY":
+            st.success("🟢 READY")
+        elif plan_status == "WATCH":
+            st.warning("🟠 WATCH")
+        elif plan_status == "INVALID":
+            st.error("🔴 INVALID")
+        else:
+            st.info("⚪ NO SETUP")
+        st.caption("Plan status")
+
+    def _fmt_plan_price(value):
+        return f"${value:.2f}" if value is not None else "N/A"
+
+    with tp2:
+        if trade_plan.get("entry_zone_low") is not None:
+            st.metric(
+                "Entry Zone",
+                f"${trade_plan['entry_zone_low']:.2f} – "
+                f"${trade_plan['entry_zone_high']:.2f}",
+            )
+        else:
+            st.metric("Entry Zone", "N/A")
+
+    with tp3:
+        st.metric(
+            "Invalidation",
+            _fmt_plan_price(trade_plan.get("invalidation")),
+        )
+
+    with tp4:
+        st.metric(
+            "Target 1",
+            _fmt_plan_price(trade_plan.get("target_1")),
+        )
+
+    with tp5:
+        st.metric(
+            "Target 2",
+            _fmt_plan_price(trade_plan.get("target_2")),
+        )
+
+    if trade_plan.get("risk_per_share") is not None:
+        st.caption(
+            f"R:R → T1 1:{trade_plan['risk_reward_1']:.1f}  •  "
+            f"T2 1:{trade_plan['risk_reward_2']:.1f}  •  "
+            f"Risk/share ${trade_plan['risk_per_share']:.2f}  •  "
+            f"{trade_plan.get('trigger', '')}"
+        )
+    else:
+        st.caption(trade_plan.get("trigger", "No trade plan available."))
+
+    with st.expander("Trade Plan reasoning"):
+        for reason in trade_plan.get("reasons", []):
+            st.write(f"✅ {reason}")
+        for warning in trade_plan.get("warnings", []):
+            st.warning(warning)
 
     with st.expander("Why this decision?"):
         left, right = st.columns(2)
@@ -3291,6 +3366,33 @@ A bearish setup inside a bullish regime is a counter-trend setup and deserves ex
 - **SELL:** bearish/short-entry conditions are confirmed.
 - **WAIT:** the setup is not sufficiently confirmed.
 - **NO TRADE:** strategy or risk conditions block the trade.
+""")
+
+    st.subheader("📋 Trade Plan")
+
+    with st.expander("Entry Zone / Invalidation / Targets"):
+        st.markdown("""
+- **READY:** swing bias and closed-candle entry confirmation agree.
+- **WATCH:** a LONG/SHORT bias exists, but entry confirmation is not ready.
+- **INVALID:** the current closed-candle state conflicts with or invalidates the swing bias.
+- **NO SETUP:** there is no clear 1–2 day LONG or SHORT bias.
+
+**Entry Zone**
+- A small ATR-based zone around the last completed 5-minute close.
+- It is meant to discourage chasing price away from the confirmed setup.
+
+**Invalidation**
+- LONG plans prefer a level below nearby 1H/4H support.
+- SHORT plans prefer a level above nearby 1H/4H resistance.
+- If no useful structural level is available, an ATR fallback is used.
+
+**Targets**
+- Target 1 = **1.5R**
+- Target 2 = **2.5R**
+
+`R` is the planned risk between entry and invalidation.
+
+A READY plan means the technical rules are aligned. It is not a guarantee that the trade will succeed.
 """)
 
     st.subheader("🛡️ Risk Management")
