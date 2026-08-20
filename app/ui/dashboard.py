@@ -969,28 +969,30 @@ def calculate_swing_outlook(multi_timeframe, trade_state):
     four_hour_direction = snapshots["4h"]["direction"]
     daily_direction = snapshots["1d"]["direction"]
 
-    if (
-        four_hour_direction == "BULLISH"
-        and daily_direction == "BULLISH"
-        and long_score >= 65
-    ):
+    minimum_bias_score = 65
+    minimum_spread = 20
+
+    long_spread = long_score - short_score
+    short_spread = short_score - long_score
+
+    if long_score >= minimum_bias_score and long_spread >= minimum_spread:
         bias = "LONG"
         bias_score = long_score
-        setup_message = "Higher timeframes favor a 1–2 day LONG swing."
-    elif (
-        four_hour_direction == "BEARISH"
-        and daily_direction == "BEARISH"
-        and short_score >= 65
-    ):
+        setup_message = (
+            "Weighted higher-timeframe evidence favors a 1–2 day LONG swing."
+        )
+    elif short_score >= minimum_bias_score and short_spread >= minimum_spread:
         bias = "SHORT"
         bias_score = short_score
-        setup_message = "Higher timeframes favor a 1–2 day SHORT swing."
+        setup_message = (
+            "Weighted higher-timeframe evidence favors a 1–2 day SHORT swing."
+        )
     else:
         bias = "WAIT"
         bias_score = max(long_score, short_score)
         setup_message = (
-            "Higher timeframes are not aligned strongly enough for a "
-            "1–2 day swing call."
+            "Higher-timeframe evidence is not strong or separated enough "
+            "for a 1–2 day swing call."
         )
 
     trade_state_name = trade_state.get("state", "WAITING")
