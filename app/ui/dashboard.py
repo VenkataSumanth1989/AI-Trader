@@ -918,6 +918,107 @@ def calculate_multi_timeframe_analysis(ticker_symbol):
     }
 
 
+
+# ============================================================
+# 1–2 DAY SWING OUTLOOK
+# ============================================================
+
+def calculate_swing_outlook(multi_timeframe, trade_state):
+    """
+    Create a simple 1–2 day swing bias from completed higher-timeframe candles.
+
+    Purpose:
+        - LONG  = buy first, then sell later if the move develops.
+        - SHORT = short-sell first, then buy back later if the move develops.
+        - WAIT  = higher timeframes are not aligned strongly enough.
+
+    This does NOT replace the 5-minute closed-candle trade state.
+    A LONG/SHORT swing bias becomes actionable only when the entry layer
+    confirms with ENTRY_READY in the same direction.
+    """
+    snapshots = multi_timeframe["snapshots"]
+
+    weights = [
+        ("4H Direction", snapshots["4h"]["direction"], 20),
+        ("Daily Direction", snapshots["1d"]["direction"], 20),
+        ("4H MA Trend", snapshots["4h"]["trend"], 15),
+        ("Daily MA Trend", snapshots["1d"]["trend"], 15),
+        ("4H MSB", snapshots["4h"]["msb_direction"], 10),
+        ("Daily MSB", snapshots["1d"]["msb_direction"], 10),
+        ("1H Direction", snapshots["1h"]["direction"], 10),
+    ]
+
+    long_points = 0
+    short_points = 0
+    total_points = sum(weight for _, _, weight in weights)
+
+    bullish_reasons = []
+    bearish_reasons = []
+
+    for label, state, weight in weights:
+        if state == "BULLISH":
+            long_points += weight
+            bullish_reasons.append(label)
+        elif state == "BEARISH":
+            short_points += weight
+            bearish_reasons.append(label)
+
+    long_score = round((long_points / total_points) * 100)
+    short_score = round((short_points / total_points) * 100)
+
+    four_hour_direction = snapshots["4h"]["direction"]
+    daily_direction = snapshots["1d"]["direction"]
+
+    if (
+        four_hour_direction == "BULLISH"
+        and daily_direction == "BULLISH"
+        and long_score >= 65
+    ):
+        bias = "LONG"
+        bias_score = long_score
+        setup_message = "Higher timeframes favor a 1–2 day LONG swing."
+    elif (
+        four_hour_direction == "BEARISH"
+        and daily_direction == "BEARISH"
+        and short_score >= 65
+    ):
+        bias = "SHORT"
+        bias_score = short_score
+        setup_message = "Higher timeframes favor a 1–2 day SHORT swing."
+    else:
+        bias = "WAIT"
+        bias_score = max(long_score, short_score)
+        setup_message = (
+            "Higher timeframes are not aligned strongly enough for a "
+            "1–2 day swing call."
+        )
+
+    trade_state_name = trade_state.get("state", "WAITING")
+    entry_direction = trade_state.get("direction", "NONE")
+
+    if (
+        bias in ("LONG", "SHORT")
+        and trade_state_name == "ENTRY_READY"
+        and entry_direction == bias
+    ):
+        action = f"{bias} ENTRY READY"
+    elif bias in ("LONG", "SHORT"):
+        action = f"WAIT FOR {bias} ENTRY"
+    else:
+        action = "NO SWING ENTRY YET"
+
+    return {
+        "bias": bias,
+        "bias_score": bias_score,
+        "long_score": long_score,
+        "short_score": short_score,
+        "action": action,
+        "message": setup_message,
+        "bullish_reasons": bullish_reasons,
+        "bearish_reasons": bearish_reasons,
+    }
+
+
 # ============================================================
 # LIVE ANALYSIS + SIGNAL TRACKING
 # ============================================================
@@ -1053,6 +1154,11 @@ def render_live_dashboard():
 
     st.session_state["trade_states"][analyzed_ticker] = trade_state
 
+    swing_outlook = calculate_swing_outlook(
+        multi_timeframe=multi_timeframe,
+        trade_state=trade_state,
+    )
+
 
     # ========================================================
     # SAVE LATEST ANALYSIS FOR CONTEXT-AWARE HELP
@@ -1076,6 +1182,7 @@ def render_live_dashboard():
         "live_price": float(live_row["Close"]),
         "closed_candle_time": str(closed_candle_index),
         "data_freshness": data_freshness,
+        "swing_outlook": swing_outlook,
     }
 
 
@@ -1213,6 +1320,34 @@ AI-Trader checks the timestamp of the latest intraday candle before calculating 
 When data is stale, the market-data layer raises an error instead of silently calculating indicators from yesterday's price. The app also retries Yahoo Finance and compares two yfinance fetch paths, preferring whichever returns the newest candle.
 """)
 
+    st.subheader("🧭 1–2 Day Swing Outlook")
+
+    with st.expander("LONG / SHORT / WAIT — how to read it"):
+        st.markdown("""
+The **1–2 Day Swing Outlook** is the higher-timeframe directional view.
+
+- **LONG BIAS:** 4H and Daily structure are aligned bullish enough to watch for a buy entry. A long trade means **buy first and sell later**.
+- **SHORT BIAS:** 4H and Daily structure are aligned bearish enough to watch for a short-sale entry. A short trade means **sell borrowed shares first and buy them back later**.
+- **WAIT / MIXED:** higher timeframes are not aligned strongly enough for a swing call.
+
+**Important:** LONG BIAS or SHORT BIAS is not itself an entry signal.
+
+Use the two layers together:
+
+1. **Swing Outlook** answers: *Which side should I be interested in for roughly the next 1–2 trading days?*
+2. **Closed-Candle Trade State** answers: *Is the entry actually confirmed now?*
+
+Example:
+
+`LONG BIAS + WAITING` → watch for a long, but do not enter yet.
+
+`LONG BIAS + ENTRY READY + Candidate Entry Direction LONG` → long entry conditions are aligned.
+
+`SHORT BIAS + ENTRY READY + Candidate Entry Direction SHORT` → short-sale entry conditions are aligned.
+
+The 1–2 day horizon is a strategy view, not a guarantee that a position should always be held exactly one or two days. Exit conditions and risk management still matter.
+""")
+
     st.subheader("🚦 Closed-Candle Trade State")
 
     s1, s2, s3, s4 = st.columns(4)
@@ -1231,7 +1366,7 @@ When data is stale, the market-data layer raises an error instead of silently ca
 
     with s2:
         st.metric(
-            "Entry Direction",
+            "Candidate Entry Direction",
             trade_state.get("direction", "NONE"),
         )
 
@@ -1255,6 +1390,52 @@ When data is stale, the market-data layer raises an error instead of silently ca
         "5-minute candles; live price can move without flipping the trade state."
     )
 
+
+    # ============================================================
+    # 1–2 DAY SWING OUTLOOK
+    # ============================================================
+
+    st.subheader("🧭 1–2 Day Swing Outlook")
+
+    sw1, sw2, sw3, sw4 = st.columns(4)
+
+    with sw1:
+        swing_bias = swing_outlook["bias"]
+
+        if swing_bias == "LONG":
+            st.success("🟢 LONG BIAS")
+        elif swing_bias == "SHORT":
+            st.error("🔴 SHORT BIAS")
+        else:
+            st.info("⚪ WAIT / MIXED")
+
+    with sw2:
+        st.metric(
+            "Higher-Timeframe Alignment",
+            f"{swing_outlook['bias_score']}%",
+        )
+
+    with sw3:
+        st.metric(
+            "Long vs Short",
+            (
+                f"L {swing_outlook['long_score']}%  /  "
+                f"S {swing_outlook['short_score']}%"
+            ),
+        )
+
+    with sw4:
+        st.metric(
+            "Action",
+            swing_outlook["action"],
+        )
+
+    st.caption(
+        swing_outlook["message"]
+        + " This is the 1–2 day directional bias. "
+        + "The actual entry should still wait for the closed-candle "
+        + "trade state to become ENTRY READY in the same direction."
+    )
 
     # ============================================================
     # PRICE PERFORMANCE
