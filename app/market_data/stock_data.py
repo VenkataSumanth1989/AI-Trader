@@ -249,17 +249,12 @@ def get_historical_data(
 
 def get_market_quote(ticker_symbol: str) -> dict:
     """
-    Fetch the latest quote separately from regular-session analysis candles.
+    Fetch a best-effort current/extended-hours quote without using ticker.info.
 
-    Priority:
-      1. Yahoo overnight quote, when exposed.
-      2. Yahoo post-market quote.
-      3. Yahoo pre-market quote.
-      4. Latest pre/post-enabled intraday candle.
-      5. Regular-market price as a fallback.
+    This avoids Yahoo metadata calls because they can be slow or hang in
+    hosted environments. It requests 5-minute candles with pre/post enabled.
 
-    This function is display-only. Strategy indicators should continue using
-    regular-session completed candles from get_historical_data().
+    Display-only: strategy calculations still use regular-session candles.
     """
     symbol = ticker_symbol.upper().strip()
 
@@ -275,166 +270,76 @@ def get_market_quote(ticker_symbol: str) -> dict:
         "available": False,
     }
 
-    ticker = yf.Ticker(symbol)
-
-    # Yahoo quote metadata sometimes exposes overnight/pre/post prices.
     try:
-        info = ticker.info or {}
+        ticker = yf.Ticker(symbol)
 
-        regular_price = info.get("regularMarketPrice")
-        previous_close = info.get("regularMarketPreviousClose")
-        market_state = str(info.get("marketState", "UNKNOWN")).upper()
-
-        overnight_price = info.get("overnightMarketPrice")
-        overnight_change = info.get("overnightMarketChange")
-        overnight_percent = info.get("overnightMarketChangePercent")
-
-        post_price = info.get("postMarketPrice")
-        post_change = info.get("postMarketChange")
-        post_percent = info.get("postMarketChangePercent")
-
-        pre_price = info.get("preMarketPrice")
-        pre_change = info.get("preMarketChange")
-        pre_percent = info.get("preMarketChangePercent")
-
-        if regular_price is not None:
-            result["regular_close"] = float(regular_price)
-
-        if overnight_price is not None:
-            result.update(
-                {
-                    "price": float(overnight_price),
-                    "session": "OVERNIGHT",
-                    "source": "YAHOO_OVERNIGHT",
-                    "change": (
-                        float(overnight_change)
-                        if overnight_change is not None
-                        else None
-                    ),
-                    "change_percent": (
-                        float(overnight_percent)
-                        if overnight_percent is not None
-                        else None
-                    ),
-                    "available": True,
-                }
-            )
-            return result
-
-        if market_state in ("POST", "POSTPOST", "CLOSED") and post_price is not None:
-            result.update(
-                {
-                    "price": float(post_price),
-                    "session": "AFTER HOURS",
-                    "source": "YAHOO_POSTMARKET",
-                    "change": (
-                        float(post_change)
-                        if post_change is not None
-                        else None
-                    ),
-                    "change_percent": (
-                        float(post_percent)
-                        if post_percent is not None
-                        else None
-                    ),
-                    "available": True,
-                }
-            )
-            return result
-
-        if market_state in ("PRE", "PREPRE") and pre_price is not None:
-            result.update(
-                {
-                    "price": float(pre_price),
-                    "session": "PREMARKET",
-                    "source": "YAHOO_PREMARKET",
-                    "change": (
-                        float(pre_change)
-                        if pre_change is not None
-                        else None
-                    ),
-                    "change_percent": (
-                        float(pre_percent)
-                        if pre_percent is not None
-                        else None
-                    ),
-                    "available": True,
-                }
-            )
-            return result
-
-        if market_state == "REGULAR" and regular_price is not None:
-            result.update(
-                {
-                    "price": float(regular_price),
-                    "session": "REGULAR",
-                    "source": "YAHOO_REGULAR",
-                    "available": True,
-                }
-            )
-            return result
-
-    except Exception:
-        pass
-
-    # Fallback: pre/post-enabled intraday history.
-    try:
         extended = ticker.history(
-            period="5d",
+            period="2d",
             interval="5m",
             auto_adjust=False,
             actions=False,
             prepost=True,
         )
+
         extended = _normalize_history(extended)
 
-        if not extended.empty:
-            latest_ts = _latest_timestamp(extended)
-            latest_price = float(extended["Close"].iloc[-1])
-
-            now_et = pd.Timestamp.now(tz="America/New_York")
-            latest_minutes = latest_ts.hour * 60 + latest_ts.minute
-
-            if latest_minutes < 9 * 60 + 30:
-                session = "PREMARKET"
-            elif latest_minutes >= 16 * 60:
-                session = "AFTER HOURS"
-            else:
-                session = "REGULAR"
-
-            result.update(
-                {
-                    "price": latest_price,
-                    "session": session,
-                    "source": "YFINANCE_PREPOST_CANDLE",
-                    "timestamp": latest_ts,
-                    "available": True,
-                }
-            )
-
+        if extended.empty:
             return result
 
-    except Exception:
-        pass
+        latest_ts = _latest_timestamp(extended)
+        latest_price = float(extended["Close"].iloc[-1])
 
-    # Final fallback: regular quote if metadata exposed it.
-    try:
-        info = ticker.info or {}
-        regular_price = info.get("regularMarketPrice")
-        if regular_price is not None:
-            result.update(
-                {
-                    "price": float(regular_price),
-                    "regular_close": float(regular_price),
-                    "session": "REGULAR / LAST",
-                    "source": "YAHOO_REGULAR_FALLBACK",
-                    "available": True,
-                }
-            )
-    except Exception:
-        pass
+        latest_minutes = latest_ts.hour * 60 + latest_ts.minute
 
-    return result
+        if latest_minutes < 9 * 60 + 30:
+            session = "PREMARKET"
+        elif latest_minutes >= 16 * 60:
+            session = "AFTER HOURS"
+        else:
+            session = "REGULAR"
+
+        ext = extended.copy()
+
+        if getattr(ext.index, "tz", None) is None:
+            ext.index = ext.index.tz_localize("America/New_York")
+        else:
+            ext.index = ext.index.tz_convert("America/New_York")
+
+        regular = ext.between_time("09:30", "16:00")
+
+        regular_close = None
+        if not regular.empty:
+            last_regular_date = regular.index[-1].date()
+            last_regular_session = regular[
+                regular.index.date == last_regular_date
+            ]
+            if not last_regular_session.empty:
+                regular_close = float(
+                    last_regular_session["Close"].iloc[-1]
+                )
+
+        result.update(
+            {
+                "price": latest_price,
+                "regular_close": regular_close,
+                "session": session,
+                "source": "YFINANCE_PREPOST_CANDLE",
+                "timestamp": latest_ts,
+                "available": True,
+            }
+        )
+
+        if regular_close is not None and regular_close != 0:
+            change = latest_price - regular_close
+            result["change"] = change
+            result["change_percent"] = (
+                change / regular_close
+            ) * 100
+
+        return result
+
+    except Exception:
+        return result
 
 
 def get_stock_data(ticker_symbol: str):
