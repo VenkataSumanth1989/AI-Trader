@@ -269,7 +269,7 @@ st.set_page_config(
 
 page = st.sidebar.radio(
     "Navigation",
-    ["📈 Analysis", "❓ Help / Indicator Guide"],
+    ["📈 Analysis", "🥇 Gold (XAUUSD)", "❓ Help / Indicator Guide"],
 )
 
 if page == "📈 Analysis":
@@ -2668,6 +2668,123 @@ def render_live_dashboard():
                     hide_index=True,
                 )
 
+
+if page == "🥇 Gold (XAUUSD)":
+    st.title("🥇 Gold — XAUUSD")
+    st.caption(
+        "Dedicated spot-gold workspace. For now the page shows a spot XAUUSD "
+        "TradingView chart. AI analysis will be added after we connect a proper "
+        "spot-gold data source."
+    )
+
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        st.metric("Asset", "Gold Spot")
+    with g2:
+        st.metric("Symbol", "XAUUSD")
+    with g3:
+        st.metric("AI Analysis", "COMING NEXT")
+
+    st.info(
+        "We are intentionally not using GC=F futures data for the gold AI logic, "
+        "so the chart and future calculations will stay on the same instrument."
+    )
+
+    st.subheader("📈 XAUUSD Chart")
+
+    gold_interval = st.selectbox(
+        "Timeframe",
+        options=[
+            ("1 minute", "1"),
+            ("5 minutes", "5"),
+            ("15 minutes", "15"),
+            ("30 minutes", "30"),
+            ("1 hour", "60"),
+            ("4 hours", "240"),
+            ("1 day", "D"),
+        ],
+        index=1,
+        format_func=lambda item: item[0],
+        key="gold_tv_interval",
+    )
+
+    gold_config = {
+        "autosize": True,
+        "symbol": "OANDA:XAUUSD",
+        "interval": gold_interval[1],
+        "timezone": "exchange",
+        "theme": "dark",
+        "style": "1",
+        "locale": "en",
+        "withdateranges": True,
+        "hide_side_toolbar": False,
+        "hide_top_toolbar": False,
+        "hide_legend": False,
+        "allow_symbol_change": False,
+        "save_image": True,
+        "details": False,
+        "hotlist": False,
+        "calendar": False,
+        "studies": ["Volume@tv-basicstudies"],
+        "support_host": "https://www.tradingview.com",
+    }
+
+    gold_json = json.dumps(gold_config)
+
+    gold_html = f"""
+    <html>
+    <head>
+        <style>
+            html, body {{
+                margin: 0;
+                padding: 0;
+                width: 100%;
+                height: 100%;
+                overflow: hidden;
+                background: #0e1117;
+            }}
+            .tradingview-widget-container {{
+                width: 100%;
+                height: 100%;
+            }}
+            .tradingview-widget-container__widget {{
+                width: 100%;
+                height: 100%;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="tradingview-widget-container">
+            <div class="tradingview-widget-container__widget"></div>
+            <script
+                type="text/javascript"
+                src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js"
+                async
+            >
+            {gold_json}
+            </script>
+        </div>
+    </body>
+    </html>
+    """
+
+    components.html(
+        gold_html,
+        height=820,
+        scrolling=False,
+    )
+
+    with st.expander("Planned Gold AI features"):
+        st.markdown("""
+- 1H / 4H / Daily trend
+- RSI / MACD / Stochastic / ADX
+- MSB / Order Blocks
+- Support / Resistance
+- LONG / SHORT / WAIT bias
+- Closed-candle entry confirmation
+- Entry Zone / Invalidation / Target 1 / Target 2
+- Risk / Reward
+""")
 
 if page == "📈 Analysis":
     render_live_dashboard()
