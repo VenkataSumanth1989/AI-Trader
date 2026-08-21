@@ -144,7 +144,8 @@ def _fetch_history_once(ticker_symbol, period, interval):
             interval=interval,
             auto_adjust=False,
             actions=False,
-            prepost=False
+            prepost=False,
+            repair=True,
         )
         history = _normalize_history(history)
 
@@ -161,8 +162,9 @@ def _fetch_history_once(ticker_symbol, period, interval):
             auto_adjust=False,
             actions=False,
             prepost=False,
+            repair=True,
             progress=False,
-            threads=False
+            threads=False,
         )
         history = _normalize_history(history)
 
@@ -242,6 +244,197 @@ def get_historical_data(
         )
 
     return freshest
+
+
+
+def get_market_quote(ticker_symbol: str) -> dict:
+    """
+    Fetch the latest quote separately from regular-session analysis candles.
+
+    Priority:
+      1. Yahoo overnight quote, when exposed.
+      2. Yahoo post-market quote.
+      3. Yahoo pre-market quote.
+      4. Latest pre/post-enabled intraday candle.
+      5. Regular-market price as a fallback.
+
+    This function is display-only. Strategy indicators should continue using
+    regular-session completed candles from get_historical_data().
+    """
+    symbol = ticker_symbol.upper().strip()
+
+    result = {
+        "symbol": symbol,
+        "price": None,
+        "regular_close": None,
+        "session": "UNKNOWN",
+        "source": "UNAVAILABLE",
+        "timestamp": None,
+        "change": None,
+        "change_percent": None,
+        "available": False,
+    }
+
+    ticker = yf.Ticker(symbol)
+
+    # Yahoo quote metadata sometimes exposes overnight/pre/post prices.
+    try:
+        info = ticker.info or {}
+
+        regular_price = info.get("regularMarketPrice")
+        previous_close = info.get("regularMarketPreviousClose")
+        market_state = str(info.get("marketState", "UNKNOWN")).upper()
+
+        overnight_price = info.get("overnightMarketPrice")
+        overnight_change = info.get("overnightMarketChange")
+        overnight_percent = info.get("overnightMarketChangePercent")
+
+        post_price = info.get("postMarketPrice")
+        post_change = info.get("postMarketChange")
+        post_percent = info.get("postMarketChangePercent")
+
+        pre_price = info.get("preMarketPrice")
+        pre_change = info.get("preMarketChange")
+        pre_percent = info.get("preMarketChangePercent")
+
+        if regular_price is not None:
+            result["regular_close"] = float(regular_price)
+
+        if overnight_price is not None:
+            result.update(
+                {
+                    "price": float(overnight_price),
+                    "session": "OVERNIGHT",
+                    "source": "YAHOO_OVERNIGHT",
+                    "change": (
+                        float(overnight_change)
+                        if overnight_change is not None
+                        else None
+                    ),
+                    "change_percent": (
+                        float(overnight_percent)
+                        if overnight_percent is not None
+                        else None
+                    ),
+                    "available": True,
+                }
+            )
+            return result
+
+        if market_state in ("POST", "POSTPOST", "CLOSED") and post_price is not None:
+            result.update(
+                {
+                    "price": float(post_price),
+                    "session": "AFTER HOURS",
+                    "source": "YAHOO_POSTMARKET",
+                    "change": (
+                        float(post_change)
+                        if post_change is not None
+                        else None
+                    ),
+                    "change_percent": (
+                        float(post_percent)
+                        if post_percent is not None
+                        else None
+                    ),
+                    "available": True,
+                }
+            )
+            return result
+
+        if market_state in ("PRE", "PREPRE") and pre_price is not None:
+            result.update(
+                {
+                    "price": float(pre_price),
+                    "session": "PREMARKET",
+                    "source": "YAHOO_PREMARKET",
+                    "change": (
+                        float(pre_change)
+                        if pre_change is not None
+                        else None
+                    ),
+                    "change_percent": (
+                        float(pre_percent)
+                        if pre_percent is not None
+                        else None
+                    ),
+                    "available": True,
+                }
+            )
+            return result
+
+        if market_state == "REGULAR" and regular_price is not None:
+            result.update(
+                {
+                    "price": float(regular_price),
+                    "session": "REGULAR",
+                    "source": "YAHOO_REGULAR",
+                    "available": True,
+                }
+            )
+            return result
+
+    except Exception:
+        pass
+
+    # Fallback: pre/post-enabled intraday history.
+    try:
+        extended = ticker.history(
+            period="5d",
+            interval="5m",
+            auto_adjust=False,
+            actions=False,
+            prepost=True,
+        )
+        extended = _normalize_history(extended)
+
+        if not extended.empty:
+            latest_ts = _latest_timestamp(extended)
+            latest_price = float(extended["Close"].iloc[-1])
+
+            now_et = pd.Timestamp.now(tz="America/New_York")
+            latest_minutes = latest_ts.hour * 60 + latest_ts.minute
+
+            if latest_minutes < 9 * 60 + 30:
+                session = "PREMARKET"
+            elif latest_minutes >= 16 * 60:
+                session = "AFTER HOURS"
+            else:
+                session = "REGULAR"
+
+            result.update(
+                {
+                    "price": latest_price,
+                    "session": session,
+                    "source": "YFINANCE_PREPOST_CANDLE",
+                    "timestamp": latest_ts,
+                    "available": True,
+                }
+            )
+
+            return result
+
+    except Exception:
+        pass
+
+    # Final fallback: regular quote if metadata exposed it.
+    try:
+        info = ticker.info or {}
+        regular_price = info.get("regularMarketPrice")
+        if regular_price is not None:
+            result.update(
+                {
+                    "price": float(regular_price),
+                    "regular_close": float(regular_price),
+                    "session": "REGULAR / LAST",
+                    "source": "YAHOO_REGULAR_FALLBACK",
+                    "available": True,
+                }
+            )
+    except Exception:
+        pass
+
+    return result
 
 
 def get_stock_data(ticker_symbol: str):
