@@ -2675,22 +2675,24 @@ def render_live_dashboard():
 if page == "🥇 Gold (XAUUSD)":
     st.title("🥇 Gold — XAUUSD")
     st.caption(
-        "Dedicated spot-gold workspace. For now the page shows a spot XAUUSD "
-        "TradingView chart. AI analysis will be added after we connect a proper "
-        "spot-gold data source."
+        "Spot-gold technical analysis and 1–2 day trade decision-support workspace."
     )
 
     g1, g2, g3 = st.columns(3)
+
     with g1:
         st.metric("Asset", "Gold Spot")
+
     with g2:
         st.metric("Symbol", "XAUUSD")
-    with g3:
-        st.metric("AI Analysis", "COMING NEXT")
 
-    st.info(
-        "We are intentionally not using GC=F futures data for the gold AI logic, "
-        "so the chart and future calculations will stay on the same instrument."
+    with g3:
+        st.metric("AI Analysis", "ACTIVE")
+
+    st.caption(
+        "Gold analysis uses XAU/USD spot data from Twelve Data, while the chart "
+        "uses OANDA:XAUUSD on TradingView. We intentionally do not substitute "
+        "GC=F futures for spot-gold calculations."
     )
 
     st.subheader("🧭 Gold Decision Center")
