@@ -46,6 +46,7 @@ def build_trade_plan(
         "risk_per_share": None,
         "risk_reward_1": None,
         "risk_reward_2": None,
+        "risk_pct": None,
         "trigger": "No trade plan yet",
         "reasons": [],
         "warnings": [],
@@ -114,8 +115,23 @@ def build_trade_plan(
             )
             return result
 
-        target_1 = close_price + (risk * 1.5)
-        target_2 = close_price + (risk * 2.5)
+        risk_pct = (risk / close_price) * 100
+        risk_too_wide = risk_pct > 4.0 or (atr > 0 and risk > atr * 3.0)
+        if risk_too_wide:
+            result["status"] = "RISK_TOO_WIDE"
+            result["warnings"].append(
+                f"Required LONG invalidation is {risk_pct:.1f}% from entry; too wide for a 1–2 day plan."
+            )
+            target_1 = None
+            target_2 = None
+        else:
+            # Keep 1–2 day objectives realistic when structural invalidation is far away.
+            if atr > 0:
+                target_1 = min(close_price + risk * 1.5, close_price + atr * 2.0)
+                target_2 = min(close_price + risk * 2.5, close_price + atr * 3.5)
+            else:
+                target_1 = close_price + risk
+                target_2 = close_price + risk * 1.5
 
         result["trigger"] = (
             "LONG entry conditions are confirmed; avoid chasing outside the entry zone."
@@ -154,8 +170,22 @@ def build_trade_plan(
             )
             return result
 
-        target_1 = close_price - (risk * 1.5)
-        target_2 = close_price - (risk * 2.5)
+        risk_pct = (risk / close_price) * 100
+        risk_too_wide = risk_pct > 4.0 or (atr > 0 and risk > atr * 3.0)
+        if risk_too_wide:
+            result["status"] = "RISK_TOO_WIDE"
+            result["warnings"].append(
+                f"Required SHORT invalidation is {risk_pct:.1f}% from entry; too wide for a 1–2 day plan."
+            )
+            target_1 = None
+            target_2 = None
+        else:
+            if atr > 0:
+                target_1 = max(close_price - risk * 1.5, close_price - atr * 2.0)
+                target_2 = max(close_price - risk * 2.5, close_price - atr * 3.5)
+            else:
+                target_1 = close_price - risk
+                target_2 = close_price - risk * 1.5
 
         result["trigger"] = (
             "SHORT entry conditions are confirmed; avoid chasing outside the entry zone."
@@ -169,8 +199,15 @@ def build_trade_plan(
             "target_1": target_1,
             "target_2": target_2,
             "risk_per_share": risk,
-            "risk_reward_1": 1.5,
-            "risk_reward_2": 2.5,
+            "risk_pct": (risk / close_price) * 100,
+            "risk_reward_1": (
+                abs(target_1 - close_price) / risk
+                if target_1 is not None else None
+            ),
+            "risk_reward_2": (
+                abs(target_2 - close_price) / risk
+                if target_2 is not None else None
+            ),
         }
     )
 
@@ -190,7 +227,7 @@ def build_trade_plan(
         )
 
     result["reasons"].append(
-        "Targets are fixed at 1.5R and 2.5R to keep the plan transparent."
+        "Targets are volatility-aware: fixed-R objectives are capped using 5-minute ATR."
     )
 
     return result

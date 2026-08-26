@@ -1343,9 +1343,10 @@ def render_live_dashboard():
     with col4:
 
         st.metric(
-            "Setup",
+            "Current Setup",
             f"{setup['direction']} • {setup['confidence']}%",
         )
+        st.caption("Short-term/current indicator state — not the 1–2 day swing bias")
 
 
     if (
@@ -1411,7 +1412,8 @@ def render_live_dashboard():
     st.caption(
         f"{swing_outlook.get('message', '')} "
         f"Action: {swing_outlook.get('action', 'NO SWING ENTRY YET')}. "
-        "Bias tells you which side to watch; Trade State tells you when."
+        "Current Setup describes short-term conditions; 1–2 Day Bias describes "
+        "the broader swing direction. If they disagree, WAIT for confirmation."
     )
 
     st.markdown("#### 📋 Trade Plan")
@@ -1424,11 +1426,17 @@ def render_live_dashboard():
             st.success("🟢 READY")
         elif plan_status == "WATCH":
             st.warning("🟠 WATCH")
+        elif plan_status == "RISK_TOO_WIDE":
+            st.error("🔴 NO TRADE")
         elif plan_status == "INVALID":
             st.error("🔴 INVALID")
         else:
             st.info("⚪ NO SETUP")
-        st.caption("Plan status")
+        st.caption(
+            "Risk too wide for 1–2 day plan"
+            if plan_status == "RISK_TOO_WIDE"
+            else "Plan status"
+        )
 
     def _fmt_plan_price(value):
         return f"${value:.2f}" if value is not None else "N/A"
@@ -1450,24 +1458,41 @@ def render_live_dashboard():
         )
 
     with tp4:
-        st.metric(
-            "Target 1",
-            _fmt_plan_price(trade_plan.get("target_1")),
-        )
+        if plan_status == "RISK_TOO_WIDE":
+            st.metric("Target 1", "HIDDEN")
+            st.caption("No target while stop/risk is unsuitable")
+        else:
+            st.metric(
+                "Target 1",
+                _fmt_plan_price(trade_plan.get("target_1")),
+            )
 
     with tp5:
-        st.metric(
-            "Target 2",
-            _fmt_plan_price(trade_plan.get("target_2")),
-        )
+        if plan_status == "RISK_TOO_WIDE":
+            st.metric("Target 2", "HIDDEN")
+            st.caption("Wait for a better entry/structure")
+        else:
+            st.metric(
+                "Target 2",
+                _fmt_plan_price(trade_plan.get("target_2")),
+            )
 
     if trade_plan.get("risk_per_share") is not None:
-        st.caption(
-            f"R:R → T1 1:{trade_plan['risk_reward_1']:.1f}  •  "
-            f"T2 1:{trade_plan['risk_reward_2']:.1f}  •  "
-            f"Risk/share ${trade_plan['risk_per_share']:.2f}  •  "
-            f"{trade_plan.get('trigger', '')}"
-        )
+        if plan_status == "RISK_TOO_WIDE":
+            st.error(
+                f"NO TRADE: risk/share ${trade_plan['risk_per_share']:.2f} "
+                f"({trade_plan.get('risk_pct', 0):.1f}% from planned entry). "
+                "The required invalidation is too far away for the configured "
+                "1–2 day setup."
+            )
+        else:
+            st.caption(
+                f"R:R → T1 1:{trade_plan['risk_reward_1']:.1f}  •  "
+                f"T2 1:{trade_plan['risk_reward_2']:.1f}  •  "
+                f"Risk/share ${trade_plan['risk_per_share']:.2f}  •  "
+                f"{trade_plan.get('trigger', '')}"
+            )
+
         st.caption(
             f"Plan basis: completed-candle analysis price ${analysis_price:.2f}. "
             "Market Quote is display context and does not recalculate the plan "
