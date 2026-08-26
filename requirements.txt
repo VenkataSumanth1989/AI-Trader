@@ -24,3 +24,4 @@ websockets==16.1.1
 scipy
 yfinance==1.5.2
 streamlit
+scipy
