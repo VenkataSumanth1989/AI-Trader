@@ -7,12 +7,46 @@ from app.indicators.order_blocks import detect_order_block
 from app.indicators.support_resistance import detect_support_resistance
 
 
+def _rma(series, period=14):
+    """
+    Wilder-style moving average.
+
+    Seed with the first period SMA, then apply Wilder's recursive update.
+    This makes RSI/ATR/ADX behavior closer to standard charting conventions.
+    """
+    values = series.astype(float).copy()
+    result = pd.Series(np.nan, index=values.index, dtype="float64")
+
+    valid = values.dropna()
+    if len(valid) < period:
+        return result
+
+    seed_index = valid.index[period - 1]
+    seed = valid.iloc[:period].mean()
+    result.loc[seed_index] = seed
+
+    start_pos = values.index.get_loc(seed_index)
+
+    previous = seed
+    for i in range(start_pos + 1, len(values)):
+        current = values.iloc[i]
+
+        if pd.isna(current):
+            result.iloc[i] = previous
+            continue
+
+        previous = ((previous * (period - 1)) + current) / period
+        result.iloc[i] = previous
+
+    return result
+
+
 def _rsi(close, period=14):
     delta = close.diff()
     gain = delta.clip(lower=0.0)
     loss = -delta.clip(upper=0.0)
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+    avg_gain = _rma(gain, period)
+    avg_loss = _rma(loss, period)
     rs = avg_gain / avg_loss.replace(0, np.nan)
     return (100 - (100 / (1 + rs))).fillna(50.0)
 
@@ -27,7 +61,7 @@ def _atr(df, period=14):
         ],
         axis=1,
     ).max(axis=1)
-    return tr.ewm(alpha=1 / period, adjust=False).mean()
+    return _rma(tr, period)
 
 
 def _adx(df, period=14):
@@ -49,10 +83,10 @@ def _adx(df, period=14):
     atr = _atr(df, period).replace(0, np.nan)
 
     plus_di = 100 * (
-        plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr
+        _rma(plus_dm, period) / atr
     )
     minus_di = 100 * (
-        minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr
+        _rma(minus_dm, period) / atr
     )
 
     dx = (
@@ -60,7 +94,7 @@ def _adx(df, period=14):
         * (plus_di - minus_di).abs()
         / (plus_di + minus_di).replace(0, np.nan)
     )
-    adx = dx.ewm(alpha=1 / period, adjust=False).mean()
+    adx = _rma(dx, period)
 
     return adx.fillna(0.0), plus_di.fillna(0.0), minus_di.fillna(0.0)
 

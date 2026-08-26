@@ -254,18 +254,6 @@ def show_tradingview_chart(
 
 
 
-# Module state populated by render_stock_page().
-ticker = DEFAULT_TICKER
-analyze = False
-account_size = 10000.0
-risk_percent = 1.0
-max_position_percent = 20.0
-starting_day_equity = 10000.0
-daily_pnl = 0.0
-consecutive_losses = 0
-max_daily_loss_percent = 2.0
-max_consecutive_losses = 3
-auto_refresh = True
 
 # ============================================================
 # CLOSED-CANDLE HELPER
@@ -930,13 +918,22 @@ def calculate_swing_outlook(multi_timeframe, trade_state):
 # LIVE ANALYSIS + SIGNAL TRACKING
 # ============================================================
 
-refresh_rate = "300s" if auto_refresh else None
+def render_live_dashboard(settings: dict):
+    """
+    Render live stock analysis using explicit per-session settings.
 
-
-@st.fragment(run_every=refresh_rate)
-def render_live_dashboard():
-
-    current_ticker = ticker.upper().strip()
+    No user-specific sidebar values are stored in module globals.
+    """
+    current_ticker = settings["ticker"].upper().strip()
+    account_size = settings["account_size"]
+    risk_percent = settings["risk_percent"]
+    max_position_percent = settings["max_position_percent"]
+    starting_day_equity = settings["starting_day_equity"]
+    daily_pnl = settings["daily_pnl"]
+    consecutive_losses = settings["consecutive_losses"]
+    max_daily_loss_percent = settings["max_daily_loss_percent"]
+    max_consecutive_losses = settings["max_consecutive_losses"]
+    auto_refresh = settings["auto_refresh"]
 
     if not current_ticker:
         st.warning("Enter a ticker symbol.")
@@ -2592,12 +2589,7 @@ def render_live_dashboard():
 
 
 def render_stock_page():
-    """Render the stock-analysis page and its sidebar controls."""
-    global ticker, analyze
-    global account_size, risk_percent, max_position_percent
-    global starting_day_equity, daily_pnl, consecutive_losses
-    global max_daily_loss_percent, max_consecutive_losses, auto_refresh
-
+    """Render the stock-analysis page and sidebar controls."""
     st.title("📈 AI-Trader")
     st.caption(
         "Technical analysis and trade setup decision-support dashboard"
@@ -2608,11 +2600,13 @@ def render_stock_page():
     ticker = st.sidebar.text_input(
         "Ticker",
         value=DEFAULT_TICKER,
+        key="stock_ticker",
     ).upper().strip()
 
-    analyze = st.sidebar.button(
+    st.sidebar.button(
         "🔄 Analyze",
         width="stretch",
+        key="stock_analyze",
     )
 
     st.sidebar.divider()
@@ -2623,6 +2617,7 @@ def render_stock_page():
         min_value=100.0,
         value=10000.0,
         step=500.0,
+        key="stock_account_size",
     )
 
     risk_percent = st.sidebar.number_input(
@@ -2631,6 +2626,7 @@ def render_stock_page():
         max_value=5.0,
         value=1.0,
         step=0.1,
+        key="stock_risk_percent",
     )
 
     max_position_percent = st.sidebar.number_input(
@@ -2639,6 +2635,7 @@ def render_stock_page():
         max_value=100.0,
         value=20.0,
         step=1.0,
+        key="stock_max_position_percent",
     )
 
     starting_day_equity = st.sidebar.number_input(
@@ -2646,12 +2643,14 @@ def render_stock_page():
         min_value=100.0,
         value=10000.0,
         step=500.0,
+        key="stock_starting_day_equity",
     )
 
     daily_pnl = st.sidebar.number_input(
         "Today's P/L ($)",
         value=0.0,
         step=25.0,
+        key="stock_daily_pnl",
     )
 
     consecutive_losses = st.sidebar.number_input(
@@ -2659,6 +2658,7 @@ def render_stock_page():
         min_value=0,
         value=0,
         step=1,
+        key="stock_consecutive_losses",
     )
 
     max_daily_loss_percent = st.sidebar.number_input(
@@ -2667,6 +2667,7 @@ def render_stock_page():
         max_value=20.0,
         value=2.0,
         step=0.1,
+        key="stock_max_daily_loss_percent",
     )
 
     max_consecutive_losses = st.sidebar.number_input(
@@ -2674,6 +2675,7 @@ def render_stock_page():
         min_value=1,
         value=3,
         step=1,
+        key="stock_max_consecutive_losses",
     )
 
     st.sidebar.divider()
@@ -2683,6 +2685,7 @@ def render_stock_page():
         "Auto refresh",
         value=True,
         help="Refresh AI analysis automatically every 5 minutes.",
+        key="stock_auto_refresh",
     )
 
     if auto_refresh:
@@ -2690,4 +2693,23 @@ def render_stock_page():
     else:
         st.sidebar.info("Live refresh: off")
 
-    render_live_dashboard()
+    settings = {
+        "ticker": ticker,
+        "account_size": float(account_size),
+        "risk_percent": float(risk_percent),
+        "max_position_percent": float(max_position_percent),
+        "starting_day_equity": float(starting_day_equity),
+        "daily_pnl": float(daily_pnl),
+        "consecutive_losses": int(consecutive_losses),
+        "max_daily_loss_percent": float(max_daily_loss_percent),
+        "max_consecutive_losses": int(max_consecutive_losses),
+        "auto_refresh": bool(auto_refresh),
+    }
+
+    refresh_rate = "300s" if auto_refresh else None
+
+    @st.fragment(run_every=refresh_rate)
+    def _render_stock_fragment():
+        render_live_dashboard(settings)
+
+    _render_stock_fragment()
