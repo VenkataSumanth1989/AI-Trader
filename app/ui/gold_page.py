@@ -1,4 +1,5 @@
 import json
+import time
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -12,7 +13,7 @@ def render_gold_page():
             "Spot-gold technical analysis and 1–2 day trade decision-support workspace."
         )
 
-        g1, g2, g3 = st.columns(3)
+        g1, g2, g3, g4 = st.columns([1, 1, 1, 0.8])
 
         with g1:
             st.metric("Asset", "Gold Spot")
@@ -23,6 +24,13 @@ def render_gold_page():
         with g3:
             st.metric("AI Analysis", "ACTIVE")
 
+        with g4:
+            refresh_gold = st.button(
+                "🔄 Refresh Gold",
+                use_container_width=True,
+                key="gold_refresh_button",
+            )
+
         st.caption(
             "Gold analysis uses XAU/USD spot data from Twelve Data, while the chart "
             "uses OANDA:XAUUSD on TradingView. We intentionally do not substitute "
@@ -31,10 +39,46 @@ def render_gold_page():
 
         st.subheader("🧭 Gold Decision Center")
 
+        # Keep the expensive 5m/1H/4H/Daily API result in this browser session.
+        # A manual refresh always bypasses the cache. Otherwise the cached result
+        # is reused for up to 5 minutes so chart/timeframe UI changes stay fast.
+        cache_key = "gold_analysis_cache"
+        now_ts = time.time()
+        cached = st.session_state.get(cache_key)
+        cache_age = (
+            now_ts - cached["fetched_at"]
+            if cached is not None
+            else None
+        )
+
+        should_refresh = (
+            refresh_gold
+            or cached is None
+            or cache_age is None
+            or cache_age >= 300
+        )
+
         try:
-            with st.spinner("Analyzing XAUUSD across 5m, 1H, 4H and Daily..."):
-                gold_analysis = calculate_gold_analysis()
-                gold_decision = calculate_gold_decision(gold_analysis)
+            if should_refresh:
+                with st.spinner("Refreshing XAUUSD across 5m, 1H, 4H and Daily..."):
+                    gold_analysis = calculate_gold_analysis()
+                    gold_decision = calculate_gold_decision(gold_analysis)
+
+                st.session_state[cache_key] = {
+                    "fetched_at": time.time(),
+                    "analysis": gold_analysis,
+                    "decision": gold_decision,
+                }
+            else:
+                gold_analysis = cached["analysis"]
+                gold_decision = cached["decision"]
+
+            fetched_at = st.session_state[cache_key]["fetched_at"]
+            age_seconds = max(0, int(time.time() - fetched_at))
+            st.caption(
+                f"Gold analysis refreshed {age_seconds}s ago • "
+                "manual Refresh Gold bypasses the 5-minute cache"
+            )
 
             bias = gold_decision["bias"]
             state = gold_decision["entry_state"]
@@ -284,3 +328,4 @@ def render_gold_page():
     - Entry Zone / Invalidation / Target 1 / Target 2
     - Risk / Reward
     """)
+

@@ -17,6 +17,7 @@ import pandas as pd
 import streamlit.components.v1 as components
 import json
 import math
+import time
 
 from datetime import datetime
 
@@ -77,6 +78,10 @@ from app.strategies.risk_guard import (
 
 from app.strategies.decision_engine import (
     make_final_decision,
+)
+
+from app.strategies.intraday_engine import (
+    calculate_intraday_signal,
 )
 
 from app.indicators.price_performance import (
@@ -902,11 +907,23 @@ def calculate_swing_outlook(multi_timeframe, trade_state):
     else:
         action = "NO SWING ENTRY YET"
 
+    weight_breakdown = [
+        {
+            "factor": label,
+            "state": state,
+            "weight": weight,
+            "long_points": weight if state == "BULLISH" else 0,
+            "short_points": weight if state == "BEARISH" else 0,
+        }
+        for label, state, weight in weights
+    ]
+
     return {
         "bias": bias,
         "bias_score": bias_score,
         "long_score": long_score,
         "short_score": short_score,
+        "weight_breakdown": weight_breakdown,
         "action": action,
         "message": setup_message,
         "bullish_reasons": bullish_reasons,
@@ -939,28 +956,62 @@ def render_live_dashboard(settings: dict):
         st.warning("Enter a ticker symbol.")
         return
 
-    try:
-        with st.spinner(f"Analyzing {current_ticker}..."):
-            (
-                analyzed_ticker,
-                row,
-                setup,
-                pullback,
-                confirmation,
-                data,
-                price_performance,
-                rsi_divergence,
-                bollinger_analysis,
-                obv_analysis,
-                live_row,
-                closed_candle_index,
-                data_freshness,
-                market_quote,
-            ) = analyze_stock(current_ticker)
+    # Cache the expensive market-data result per ticker for up to 5 minutes.
+    # Clicking Analyze forces a fresh fetch immediately. Risk-setting changes
+    # and other UI reruns reuse the same market data instead of downloading it again.
+    force_refresh = bool(settings.get("force_refresh", False))
+    cache_bucket = st.session_state.setdefault(
+        "stock_market_analysis_cache",
+        {},
+    )
+    cached = cache_bucket.get(current_ticker)
+    now_ts = time.time()
+    cache_age = (
+        now_ts - cached["fetched_at"]
+        if cached is not None
+        else None
+    )
 
-            multi_timeframe = calculate_multi_timeframe_analysis(
-                current_ticker
-            )
+    should_refresh = (
+        force_refresh
+        or cached is None
+        or cache_age is None
+        or cache_age >= 300
+    )
+
+    try:
+        if should_refresh:
+            with st.spinner(f"Refreshing market data for {current_ticker}..."):
+                analysis_result = analyze_stock(current_ticker)
+                multi_timeframe = calculate_multi_timeframe_analysis(
+                    current_ticker
+                )
+
+            cache_bucket[current_ticker] = {
+                "fetched_at": time.time(),
+                "analysis_result": analysis_result,
+                "multi_timeframe": multi_timeframe,
+            }
+        else:
+            analysis_result = cached["analysis_result"]
+            multi_timeframe = cached["multi_timeframe"]
+
+        (
+            analyzed_ticker,
+            row,
+            setup,
+            pullback,
+            confirmation,
+            data,
+            price_performance,
+            rsi_divergence,
+            bollinger_analysis,
+            obv_analysis,
+            live_row,
+            closed_candle_index,
+            data_freshness,
+            market_quote,
+        ) = analysis_result
 
     except Exception as e:
         st.error(f"Unable to analyze {current_ticker}: {e}")
@@ -1071,6 +1122,8 @@ def render_live_dashboard(settings: dict):
         multi_timeframe=multi_timeframe,
     )
 
+    intraday_signal = calculate_intraday_signal(row)
+
 
     # ========================================================
     # SAVE LATEST ANALYSIS FOR CONTEXT-AWARE HELP
@@ -1097,6 +1150,7 @@ def render_live_dashboard(settings: dict):
         "market_quote": market_quote,
         "swing_outlook": swing_outlook,
         "trade_plan": trade_plan,
+        "intraday_signal": intraday_signal,
     }
 
 
@@ -1305,6 +1359,206 @@ def render_live_dashboard(settings: dict):
         "the broader swing direction. If they disagree, WAIT for confirmation."
     )
 
+    st.markdown("#### ⭐ Primary Indicators")
+
+    ema_state = (
+        "BULLISH"
+        if row["EMA_9"] > row["EMA_20"] > row["EMA_50"]
+        else "BEARISH"
+        if row["EMA_9"] < row["EMA_20"] < row["EMA_50"]
+        else "MIXED"
+    )
+
+    stoch_state = (
+        "BULLISH"
+        if row["STOCH_K"] > row["STOCH_D"]
+        else "BEARISH"
+        if row["STOCH_K"] < row["STOCH_D"]
+        else "NEUTRAL"
+    )
+
+    wt1 = row.get("WT_LB")
+    wt2 = row.get("WT_LB_SIGNAL")
+
+    wt_state = (
+        "BULLISH"
+        if pd.notna(wt1) and pd.notna(wt2) and wt1 > wt2
+        else "BEARISH"
+        if pd.notna(wt1) and pd.notna(wt2) and wt1 < wt2
+        else "NOT READY"
+    )
+
+    st_value = row.get("SUPERTREND")
+    st_direction_value = row.get("SUPERTREND_DIRECTION", 0)
+
+    supertrend_state = (
+        "BULLISH"
+        if st_direction_value == 1
+        else "BEARISH"
+        if st_direction_value == -1
+        else "NOT READY"
+    )
+
+    pi1, pi2, pi3, pi4 = st.columns(4)
+
+    with pi1:
+        st.metric(
+            "EMA 9 / 20 / 50",
+            ema_state,
+        )
+        st.caption(
+            f"{row['EMA_9']:.2f} / {row['EMA_20']:.2f} / {row['EMA_50']:.2f}"
+        )
+
+    with pi2:
+        st.metric(
+            "Stochastic",
+            stoch_state,
+        )
+        st.caption(
+            f"%K {row['STOCH_K']:.1f} • %D {row['STOCH_D']:.1f}"
+        )
+
+    with pi3:
+        st.metric(
+            "WT_LB",
+            wt_state,
+        )
+        if pd.notna(wt1) and pd.notna(wt2):
+            st.caption(f"WT1 {wt1:.1f} • WT2 {wt2:.1f}")
+        else:
+            st.caption("WaveTrend warming up")
+
+    with pi4:
+        st.metric(
+            "Supertrend",
+            supertrend_state,
+        )
+        if pd.notna(st_value):
+            st.caption(f"Line ${st_value:.2f}")
+        else:
+            st.caption("Supertrend warming up")
+
+    primary_states = [
+        ema_state,
+        stoch_state,
+        wt_state,
+        supertrend_state,
+    ]
+
+    bullish_primary = sum(state == "BULLISH" for state in primary_states)
+    bearish_primary = sum(state == "BEARISH" for state in primary_states)
+
+    if bullish_primary > bearish_primary:
+        primary_alignment = f"BULLISH {bullish_primary}/4"
+    elif bearish_primary > bullish_primary:
+        primary_alignment = f"BEARISH {bearish_primary}/4"
+    else:
+        primary_alignment = "MIXED"
+
+    st.caption(
+        f"Primary alignment: **{primary_alignment}**. "
+        "WT_LB and Supertrend are displayed as confirmation context only for now; "
+        "they do not yet change the setup or swing-bias score."
+    )
+
+
+    st.markdown("#### ⚡ Intraday Decision Center")
+    st.caption(
+        "Uses the last completed 5-minute candle and is independent of the "
+        "1–2 day swing bias."
+    )
+
+    intraday_direction = intraday_signal.get("direction", "WAIT")
+    intraday_state = intraday_signal.get("signal", "WAIT")
+    intraday_score = intraday_signal.get("confidence", 0)
+    intraday_ready = intraday_signal.get("entry_ready", False)
+
+    i1, i2, i3, i4 = st.columns(4)
+
+    with i1:
+        if intraday_direction == "LONG":
+            st.success("🟢 LONG")
+        elif intraday_direction == "SHORT":
+            st.error("🔴 SHORT")
+        else:
+            st.info("⚪ WAIT")
+        st.caption("Intraday direction")
+
+    with i2:
+        st.metric("Signal", intraday_state)
+
+    with i3:
+        st.metric("Intraday Score", f"{intraday_score}%")
+        st.caption("Technical alignment score, not probability")
+
+    with i4:
+        st.metric(
+            "Entry Readiness",
+            "ALIGNED" if intraday_ready else "WAIT",
+        )
+
+    st.write(
+        f"**Action:** {intraday_signal.get('action', 'WAIT — no intraday setup')}"
+    )
+
+    states = intraday_signal.get("states", {})
+    c1, c2, c3, c4, c5 = st.columns(5)
+
+    with c1:
+        st.metric("EMA 9/20/50", states.get("ema", "N/A"))
+    with c2:
+        st.metric("Supertrend", states.get("supertrend", "N/A"))
+    with c3:
+        st.metric("WT_LB", states.get("wt_lb", "N/A"))
+    with c4:
+        st.metric("Stochastic", states.get("stochastic", "N/A"))
+    with c5:
+        st.metric("VWAP", states.get("vwap", "N/A"))
+
+    st.caption(
+        f"Intraday score → LONG {intraday_signal.get('long_score', 0)}/100 • "
+        f"SHORT {intraday_signal.get('short_score', 0)}/100 • "
+        f"spread {intraday_signal.get('score_spread', 0)} points."
+    )
+
+    if (
+        swing_bias in ("LONG", "SHORT")
+        and intraday_direction in ("LONG", "SHORT")
+        and swing_bias != intraday_direction
+    ):
+        st.warning(
+            f"Timeframe conflict: swing bias is {swing_bias}, while intraday "
+            f"direction is {intraday_direction}. Treat this as a possible "
+            "counter-trend intraday move, not a change in the swing outlook."
+        )
+
+    with st.expander("Intraday reasoning", expanded=False):
+        left, right = st.columns(2)
+
+        with left:
+            st.markdown("**Bullish evidence**")
+            items = intraday_signal.get("bullish_reasons", [])
+            if items:
+                for reason in items:
+                    st.write(f"✅ {reason}")
+            else:
+                st.write("No bullish intraday confirmations.")
+
+        with right:
+            st.markdown("**Bearish evidence**")
+            items = intraday_signal.get("bearish_reasons", [])
+            if items:
+                for reason in items:
+                    st.write(f"🔻 {reason}")
+            else:
+                st.write("No bearish intraday confirmations.")
+
+        for warning in intraday_signal.get("warnings", []):
+            st.warning(warning)
+
+    st.divider()
+
     st.markdown("#### 📋 Trade Plan")
 
     tp1, tp2, tp3, tp4, tp5 = st.columns(5)
@@ -1414,6 +1668,109 @@ def render_live_dashboard(settings: dict):
                     st.write(f"⚠️ {item}")
             else:
                 st.write("No strong bearish higher-timeframe evidence.")
+
+    with st.expander("🧠 Decision Breakdown — exact scoring", expanded=False):
+        st.caption(
+            "This exposes the calculations already used by AI-Trader. "
+            "No strategy weights are changed by this panel."
+        )
+
+        st.markdown("##### Current Setup Evidence")
+        setup_total = setup.get(
+            "total_evidence",
+            setup.get("bullish_evidence", 0) + setup.get("bearish_evidence", 0),
+        )
+
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Bullish Evidence", setup.get("bullish_evidence", 0))
+        a2.metric("Bearish Evidence", setup.get("bearish_evidence", 0))
+        a3.metric("Evidence Total", setup_total)
+        a4.metric("Setup Confidence", f"{setup.get('confidence', 0)}%")
+
+        if setup_total:
+            st.caption(
+                f"Raw evidence ratio: bullish {setup.get('bullish_ratio', 0):.1f}% / "
+                f"bearish {setup.get('bearish_ratio', 0):.1f}%."
+            )
+
+        adjustment_rows = []
+        for name, value in setup.get("confidence_adjustments", {}).items():
+            if value not in (0, None):
+                adjustment_rows.append({
+                    "Adjustment": name.replace("_", " ").title(),
+                    "Effect": value,
+                })
+
+        if adjustment_rows:
+            st.dataframe(
+                pd.DataFrame(adjustment_rows),
+                width="stretch",
+                hide_index=True,
+            )
+
+        st.markdown("##### Setup Quality Score")
+        quality_rows = setup_quality.get("breakdown", [])
+        if quality_rows:
+            st.dataframe(
+                pd.DataFrame(quality_rows).rename(
+                    columns={
+                        "factor": "Factor",
+                        "points": "Points",
+                        "detail": "Why",
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+            st.caption(
+                f"Quality score {setup_quality.get('score', 0)}/100 "
+                f"→ Grade {setup_quality.get('quality', 'N/A')}."
+            )
+        else:
+            st.info("No setup-quality points were awarded.")
+
+        st.markdown("##### 1–2 Day Bias Weights")
+        bias_rows = swing_outlook.get("weight_breakdown", [])
+        if bias_rows:
+            st.dataframe(
+                pd.DataFrame(bias_rows).rename(
+                    columns={
+                        "factor": "Factor",
+                        "state": "State",
+                        "weight": "Weight",
+                        "long_points": "LONG",
+                        "short_points": "SHORT",
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+        st.caption(
+            f"LONG {swing_outlook.get('long_score', 0)}% vs "
+            f"SHORT {swing_outlook.get('short_score', 0)}%. "
+            "Bias requires >=65% plus a >=20-point advantage."
+        )
+
+        st.markdown("##### Entry Confirmation")
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("Direction", confirmation.get("direction", "NONE"))
+        e2.metric("Decision", confirmation.get("decision", "NO_ENTRY"))
+        e3.metric(
+            "Evidence",
+            f"{max(confirmation.get('bullish_evidence', 0), confirmation.get('bearish_evidence', 0))}/"
+            f"{confirmation.get('max_evidence', 0)}",
+        )
+        e4.metric("Confidence", f"{confirmation.get('confidence', 0)}%")
+
+        st.markdown("##### Final Gate State")
+        st.write(
+            f"**Swing Bias:** {swing_outlook.get('bias', 'WAIT')}  •  "
+            f"**Trade State:** {trade_state.get('state', 'WAITING')}  •  "
+            f"**Candidate:** {trade_state.get('direction', 'NONE')}  •  "
+            f"**Final Engine:** {final_decision.get('decision', 'WAIT')}"
+        )
+        st.caption(trade_state.get("reason", ""))
 
     # ============================================================
     # MAIN ANALYSIS TABS
@@ -2478,6 +2835,18 @@ def render_live_dashboard(settings: dict):
 
                     "Relative Volume": row["RELATIVE_VOLUME"],
 
+                    "WT_LB": row.get("WT_LB"),
+                    "WT_LB Signal": row.get("WT_LB_SIGNAL"),
+                    "Supertrend": row.get("SUPERTREND"),
+                    "Supertrend Direction": row.get("SUPERTREND_DIRECTION"),
+
+                    "Intraday Direction": intraday_signal.get("direction"),
+                    "Intraday Signal": intraday_signal.get("signal"),
+                    "Intraday Score": intraday_signal.get("confidence"),
+                    "Intraday Long Score": intraday_signal.get("long_score"),
+                    "Intraday Short Score": intraday_signal.get("short_score"),
+                    "Intraday Entry Ready": intraday_signal.get("entry_ready"),
+
                     "Bollinger Upper": row["BB_UPPER"],
                     "Bollinger Middle": row["BB_MIDDLE"],
                     "Bollinger Lower": row["BB_LOWER"],
@@ -2603,10 +2972,11 @@ def render_stock_page():
         key="stock_ticker",
     ).upper().strip()
 
-    st.sidebar.button(
+    analyze_clicked = st.sidebar.button(
         "🔄 Analyze",
         width="stretch",
         key="stock_analyze",
+        help="Force a fresh market-data download and recalculate all timeframes.",
     )
 
     st.sidebar.divider()
@@ -2704,6 +3074,7 @@ def render_stock_page():
         "max_daily_loss_percent": float(max_daily_loss_percent),
         "max_consecutive_losses": int(max_consecutive_losses),
         "auto_refresh": bool(auto_refresh),
+        "force_refresh": bool(analyze_clicked),
     }
 
     refresh_rate = "300s" if auto_refresh else None

@@ -473,6 +473,18 @@ def detect_setup(row: pd.Series) -> dict:
         "quality": quality,
         "bullish_evidence": bullish,
         "bearish_evidence": bearish,
+        "total_evidence": total_evidence,
+        "bullish_ratio": round(bullish_ratio * 100, 1),
+        "bearish_ratio": round((1 - bullish_ratio) * 100, 1),
+        "confidence_adjustments": {
+            "low_volume": -8 if relative_volume < 1.0 else 0,
+            "weak_adx": -8 if adx < 20 else (-4 if adx < 25 else 0),
+            "counter_trend": -10 if setup in (
+                "COUNTER_TREND_BOUNCE",
+                "COUNTER_TREND_BEARISH",
+            ) else 0,
+            "no_setup_cap": 60 if setup == "NO_SETUP" else None,
+        },
         "reasons": reasons,
         "warnings": warnings,
     }

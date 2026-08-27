@@ -13,6 +13,7 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
     score = 0
     reasons = []
     warnings = []
+    breakdown = []
 
     # --------------------------------------------------
     # 1. LONG-TERM TREND
@@ -24,10 +25,12 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
     if direction == "BULLISH" and market_regime == "BULLISH":
         score += 20
         reasons.append("Direction aligned with bullish long-term trend")
+        breakdown.append(("Long-term trend", 20, "Aligned bullish regime"))
 
     elif direction == "BEARISH" and market_regime == "BEARISH":
         score += 20
         reasons.append("Direction aligned with bearish long-term trend")
+        breakdown.append(("Long-term trend", 20, "Aligned bearish regime"))
 
     elif market_regime == "UNKNOWN":
         warnings.append("Long-term trend unavailable")
@@ -52,10 +55,12 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
     if direction == "BULLISH" and ema_bullish:
         score += 15
         reasons.append("EMA structure supports bullish direction")
+        breakdown.append(("EMA structure", 15, "EMA 9 > EMA 20 > EMA 50"))
 
     elif direction == "BEARISH" and ema_bearish:
         score += 15
         reasons.append("EMA structure supports bearish direction")
+        breakdown.append(("EMA structure", 15, "EMA 9 < EMA 20 < EMA 50"))
 
     else:
         warnings.append("EMA structure is not fully aligned")
@@ -67,10 +72,12 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
     if direction == "BULLISH" and row["Close"] > row["VWAP"]:
         score += 15
         reasons.append("Price above VWAP")
+        breakdown.append(("VWAP", 15, "Price above VWAP"))
 
     elif direction == "BEARISH" and row["Close"] < row["VWAP"]:
         score += 15
         reasons.append("Price below VWAP")
+        breakdown.append(("VWAP", 15, "Price below VWAP"))
 
     else:
         warnings.append("Price is on the wrong side of VWAP")
@@ -92,10 +99,12 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
     if direction == "BULLISH" and macd_bullish:
         score += 15
         reasons.append("MACD confirms bullish momentum")
+        breakdown.append(("MACD momentum", 15, "MACD + histogram bullish"))
 
     elif direction == "BEARISH" and macd_bearish:
         score += 15
         reasons.append("MACD confirms bearish momentum")
+        breakdown.append(("MACD momentum", 15, "MACD + histogram bearish"))
 
     else:
         warnings.append("MACD momentum is not fully confirmed")
@@ -111,10 +120,12 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
     if direction == "BULLISH" and di_plus > di_minus:
         score += 10
         reasons.append("Directional movement supports buyers")
+        breakdown.append(("DI direction", 10, "DI+ > DI-"))
 
     elif direction == "BEARISH" and di_minus > di_plus:
         score += 10
         reasons.append("Directional movement supports sellers")
+        breakdown.append(("DI direction", 10, "DI- > DI+"))
 
     else:
         warnings.append("Directional movement is not aligned")
@@ -122,6 +133,7 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
     if adx >= 25:
         score += 5
         reasons.append("ADX confirms meaningful trend")
+        breakdown.append(("ADX strength", 5, "ADX >= 25"))
     else:
         warnings.append("ADX indicates weak/developing trend")
 
@@ -134,6 +146,7 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
     if relative_volume >= 1.5:
         score += 10
         reasons.append("Volume confirms participation")
+        breakdown.append(("Relative volume", 10, "Relative volume >= 1.5x"))
 
     elif relative_volume < 1.0:
         warnings.append("Below-average volume")
@@ -152,6 +165,7 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
         if 50 <= rsi < 70:
             score += 5
             reasons.append("RSI in healthy bullish zone")
+            breakdown.append(("RSI", 5, "Healthy bullish zone"))
 
         elif rsi >= 70:
             warnings.append("RSI is overbought")
@@ -164,6 +178,7 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
         if 30 < rsi <= 50:
             score += 5
             reasons.append("RSI supports bearish momentum")
+            breakdown.append(("RSI", 5, "Healthy bearish zone"))
 
         elif rsi <= 30:
             warnings.append("RSI is oversold")
@@ -183,6 +198,7 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
         if stoch_k > stoch_d and stoch_k < 80:
             score += 5
             reasons.append("Stochastic supports bullish momentum")
+            breakdown.append(("Stochastic", 5, "%K > %D and below 80"))
 
         elif stoch_k >= 80:
             warnings.append("Stochastic is overbought")
@@ -192,6 +208,7 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
         if stoch_k < stoch_d and stoch_k > 20:
             score += 5
             reasons.append("Stochastic supports bearish momentum")
+            breakdown.append(("Stochastic", 5, "%K < %D and above 20"))
 
         elif stoch_k <= 20:
             warnings.append("Stochastic is oversold")
@@ -215,10 +232,12 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
                 "Price extended more than 2 ATR from VWAP"
             )
             score -= 10
+            breakdown.append(("ATR extension", -10, "Price >= 2 ATR from VWAP"))
 
         elif extension <= 1:
             score += 5
             reasons.append("Price is reasonably close to VWAP")
+            breakdown.append(("VWAP proximity", 5, "Price within 1 ATR of VWAP"))
 
     # --------------------------------------------------
     # FINAL SCORE
@@ -261,6 +280,10 @@ def calculate_setup_quality(row: pd.Series, setup: dict) -> dict:
         "quality": quality,
         "score": score,
         "decision": decision,
+        "breakdown": [
+            {"factor": factor, "points": points, "detail": detail}
+            for factor, points, detail in breakdown
+        ],
         "reasons": reasons,
         "warnings": warnings,
     }

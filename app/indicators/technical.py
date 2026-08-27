@@ -101,6 +101,14 @@ def add_technical_indicators(data: pd.DataFrame) -> pd.DataFrame:
     result["MACD_HISTOGRAM"] = histogram
     result["RELATIVE_VOLUME"] = calculate_relative_volume(result)
 
+    wt1, wt2 = calculate_wt_lb(result)
+    result["WT_LB"] = wt1
+    result["WT_LB_SIGNAL"] = wt2
+
+    supertrend, supertrend_direction = calculate_supertrend(result)
+    result["SUPERTREND"] = supertrend
+    result["SUPERTREND_DIRECTION"] = supertrend_direction
+
     return result
 
 
@@ -160,6 +168,161 @@ def calculate_macd(
     ).mean()
 
     return macd, signal, macd - signal
+
+
+
+def calculate_wt_lb(
+    data: pd.DataFrame,
+    channel_length: int = 10,
+    average_length: int = 21,
+    signal_length: int = 4,
+):
+    """
+    WaveTrend LazyBear-style oscillator (WT_LB).
+
+    Returns:
+        wt1: main WaveTrend line
+        wt2: signal line (SMA of wt1)
+
+    This is currently display/confirmation context only; it does not change
+    the setup score.
+    """
+    ap = (
+        data["High"] + data["Low"] + data["Close"]
+    ) / 3.0
+
+    esa = ap.ewm(
+        span=channel_length,
+        adjust=False,
+    ).mean()
+
+    deviation = (ap - esa).abs().ewm(
+        span=channel_length,
+        adjust=False,
+    ).mean()
+
+    safe_deviation = deviation.replace(0, np.nan)
+
+    ci = (ap - esa) / (0.015 * safe_deviation)
+
+    wt1 = ci.ewm(
+        span=average_length,
+        adjust=False,
+    ).mean()
+
+    wt2 = wt1.rolling(
+        window=signal_length,
+        min_periods=signal_length,
+    ).mean()
+
+    return wt1, wt2
+
+
+def calculate_supertrend(
+    data: pd.DataFrame,
+    period: int = 10,
+    multiplier: float = 3.0,
+):
+    """
+    Standard Supertrend using Wilder-style ATR smoothing.
+
+    Returns:
+        supertrend line
+        direction: 1 bullish, -1 bearish
+    """
+    high = data["High"].astype(float)
+    low = data["Low"].astype(float)
+    close = data["Close"].astype(float)
+
+    previous_close = close.shift(1)
+
+    true_range = pd.concat(
+        [
+            high - low,
+            (high - previous_close).abs(),
+            (low - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    atr = true_range.ewm(
+        alpha=1 / period,
+        adjust=False,
+        min_periods=period,
+    ).mean()
+
+    hl2 = (high + low) / 2.0
+    basic_upper = hl2 + multiplier * atr
+    basic_lower = hl2 - multiplier * atr
+
+    final_upper = basic_upper.copy()
+    final_lower = basic_lower.copy()
+
+    supertrend = pd.Series(
+        np.nan,
+        index=data.index,
+        dtype="float64",
+    )
+
+    direction = pd.Series(
+        0,
+        index=data.index,
+        dtype="int64",
+    )
+
+    for i in range(1, len(data)):
+        if pd.isna(atr.iloc[i]):
+            continue
+
+        prev_upper = final_upper.iloc[i - 1]
+        prev_lower = final_lower.iloc[i - 1]
+        prev_close_value = close.iloc[i - 1]
+
+        if (
+            pd.isna(prev_upper)
+            or basic_upper.iloc[i] < prev_upper
+            or prev_close_value > prev_upper
+        ):
+            final_upper.iloc[i] = basic_upper.iloc[i]
+        else:
+            final_upper.iloc[i] = prev_upper
+
+        if (
+            pd.isna(prev_lower)
+            or basic_lower.iloc[i] > prev_lower
+            or prev_close_value < prev_lower
+        ):
+            final_lower.iloc[i] = basic_lower.iloc[i]
+        else:
+            final_lower.iloc[i] = prev_lower
+
+        prev_st = supertrend.iloc[i - 1]
+
+        if pd.isna(prev_st):
+            if close.iloc[i] >= final_lower.iloc[i]:
+                supertrend.iloc[i] = final_lower.iloc[i]
+                direction.iloc[i] = 1
+            else:
+                supertrend.iloc[i] = final_upper.iloc[i]
+                direction.iloc[i] = -1
+
+        elif prev_st == prev_upper:
+            if close.iloc[i] <= final_upper.iloc[i]:
+                supertrend.iloc[i] = final_upper.iloc[i]
+                direction.iloc[i] = -1
+            else:
+                supertrend.iloc[i] = final_lower.iloc[i]
+                direction.iloc[i] = 1
+
+        else:
+            if close.iloc[i] >= final_lower.iloc[i]:
+                supertrend.iloc[i] = final_lower.iloc[i]
+                direction.iloc[i] = 1
+            else:
+                supertrend.iloc[i] = final_upper.iloc[i]
+                direction.iloc[i] = -1
+
+    return supertrend, direction
 
 
 def calculate_relative_volume(

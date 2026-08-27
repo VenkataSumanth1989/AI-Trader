@@ -90,6 +90,7 @@ def confirm_entry(row: pd.Series, pullback: dict) -> dict:
                 "confidence": min(95, 60 + bullish * 5),
                 "bullish_evidence": bullish,
                 "bearish_evidence": bearish,
+                "max_evidence": 10,
                 "decision": "ENTRY_CONFIRMED",
                 "reasons": reasons,
                 "warnings": warnings,
@@ -103,6 +104,7 @@ def confirm_entry(row: pd.Series, pullback: dict) -> dict:
                 "confidence": 50 + bullish * 4,
                 "bullish_evidence": bullish,
                 "bearish_evidence": bearish,
+                "max_evidence": 10,
                 "decision": "WAIT_FOR_CONFIRMATION",
                 "reasons": reasons,
                 "warnings": warnings,
@@ -190,6 +192,7 @@ def confirm_entry(row: pd.Series, pullback: dict) -> dict:
                 "confidence": min(95, 60 + bearish * 5),
                 "bullish_evidence": bullish,
                 "bearish_evidence": bearish,
+                "max_evidence": 10,
                 "decision": "ENTRY_CONFIRMED",
                 "reasons": reasons,
                 "warnings": warnings,
@@ -203,6 +206,7 @@ def confirm_entry(row: pd.Series, pullback: dict) -> dict:
                 "confidence": 50 + bearish * 4,
                 "bullish_evidence": bullish,
                 "bearish_evidence": bearish,
+                "max_evidence": 10,
                 "decision": "WAIT_FOR_CONFIRMATION",
                 "reasons": reasons,
                 "warnings": warnings,
@@ -249,6 +253,7 @@ def confirm_entry(row: pd.Series, pullback: dict) -> dict:
                 "confidence": 85,
                 "bullish_evidence": 5,
                 "bearish_evidence": 0,
+                "max_evidence": 5,
                 "decision": "ENTRY_CONFIRMED",
                 "reasons": [
                     "Trend continuation conditions aligned"
@@ -264,6 +269,7 @@ def confirm_entry(row: pd.Series, pullback: dict) -> dict:
                 "confidence": 85,
                 "bullish_evidence": 0,
                 "bearish_evidence": 5,
+                "max_evidence": 5,
                 "decision": "ENTRY_CONFIRMED",
                 "reasons": [
                     "Bearish continuation conditions aligned"
@@ -281,6 +287,7 @@ def confirm_entry(row: pd.Series, pullback: dict) -> dict:
         "confidence": 0,
         "bullish_evidence": 0,
         "bearish_evidence": 0,
+        "max_evidence": 0,
         "decision": "NO_ENTRY",
         "reasons": [],
         "warnings": [
