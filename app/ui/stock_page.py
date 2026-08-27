@@ -84,6 +84,10 @@ from app.strategies.intraday_engine import (
     calculate_intraday_signal,
 )
 
+from app.strategies.intraday_trade_plan import (
+    build_intraday_trade_plan,
+)
+
 from app.indicators.price_performance import (
     calculate_price_performance,
 )
@@ -1151,6 +1155,7 @@ def render_live_dashboard(settings: dict):
         "swing_outlook": swing_outlook,
         "trade_plan": trade_plan,
         "intraday_signal": intraday_signal,
+        "intraday_trade_plan": intraday_trade_plan,
     }
 
 
@@ -1556,6 +1561,99 @@ def render_live_dashboard(settings: dict):
 
         for warning in intraday_signal.get("warnings", []):
             st.warning(warning)
+
+    st.divider()
+
+
+    st.markdown("##### ⚡ Intraday Trade Plan")
+
+    intraday_plan_status = intraday_trade_plan.get("status", "NO_SETUP")
+    intraday_plan_direction = intraday_trade_plan.get("direction", "NONE")
+
+    p1, p2, p3, p4, p5 = st.columns(5)
+
+    with p1:
+        if intraday_plan_status == "READY":
+            st.success(f"🟢 READY {intraday_plan_direction}")
+        elif intraday_plan_status == "WATCH":
+            st.warning(f"🟠 WATCH {intraday_plan_direction}")
+        elif intraday_plan_status == "EARLY":
+            st.info(f"🟡 EARLY {intraday_plan_direction}")
+        else:
+            st.info("⚪ NO SETUP")
+        st.caption("Intraday plan")
+
+    def _fmt_intraday(value):
+        return f"${value:.2f}" if value is not None else "N/A"
+
+    with p2:
+        if intraday_trade_plan.get("entry_low") is not None:
+            st.metric(
+                "Entry Zone",
+                f"${intraday_trade_plan['entry_low']:.2f} – "
+                f"${intraday_trade_plan['entry_high']:.2f}",
+            )
+        else:
+            st.metric("Entry Zone", "N/A")
+
+    with p3:
+        st.metric(
+            "Invalidation",
+            _fmt_intraday(intraday_trade_plan.get("invalidation")),
+        )
+
+    with p4:
+        st.metric(
+            "Target 1",
+            _fmt_intraday(intraday_trade_plan.get("target1")),
+        )
+
+    with p5:
+        st.metric(
+            "Target 2",
+            _fmt_intraday(intraday_trade_plan.get("target2")),
+        )
+
+    if intraday_trade_plan.get("risk_per_share") is not None:
+        st.caption(
+            f"Intraday R:R → T1 1:{intraday_trade_plan.get('rr1', 0):.1f} • "
+            f"T2 1:{intraday_trade_plan.get('rr2', 0):.1f} • "
+            f"Risk/share ${intraday_trade_plan['risk_per_share']:.2f}"
+        )
+
+        if intraday_plan_status != "READY":
+            st.caption(
+                "Conditional planning levels only — WAIT/EARLY is not an entry."
+            )
+
+        if (
+            swing_bias in ("LONG", "SHORT")
+            and intraday_plan_direction in ("LONG", "SHORT")
+            and swing_bias != intraday_plan_direction
+        ):
+            st.warning(
+                f"Counter-trend intraday plan: swing bias is {swing_bias}, "
+                f"intraday direction is {intraday_plan_direction}."
+            )
+    else:
+        st.caption(
+            intraday_trade_plan.get("reason", "No intraday plan available.")
+        )
+
+    with st.expander("Intraday trade-plan details", expanded=False):
+        st.write(f"**Reason:** {intraday_trade_plan.get('reason', 'N/A')}")
+        if intraday_trade_plan.get("recent_high") is not None:
+            st.write(
+                f"**Recent 5m High:** ${intraday_trade_plan['recent_high']:.2f}"
+            )
+        if intraday_trade_plan.get("recent_low") is not None:
+            st.write(
+                f"**Recent 5m Low:** ${intraday_trade_plan['recent_low']:.2f}"
+            )
+        st.caption(
+            "Based on completed 5-minute data, EMA/VWAP reference, ATR, "
+            "and recent 5-minute structure."
+        )
 
     st.divider()
 
