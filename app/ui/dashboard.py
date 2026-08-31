@@ -1,9 +1,19 @@
+import os
+import sys
+
+# Make project root importable on Streamlit Cloud
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..")
+)
+
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import streamlit as st
 
 from app.ui.stock_page import render_stock_page
 from app.ui.gold_page import render_gold_page
 from app.ui.help_page import render_help_page
-
 
 st.set_page_config(
     page_title="AI-Trader",
