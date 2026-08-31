@@ -265,6 +265,24 @@ def show_tradingview_chart(
 
 
 # ============================================================
+# DATETIME NORMALIZATION
+# ============================================================
+
+def _normalize_datetime_index_utc_naive(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize a DatetimeIndex to UTC and make it timezone-naive."""
+    if frame is None or frame.empty:
+        return frame
+    result = frame.copy()
+    if not isinstance(result.index, pd.DatetimeIndex):
+        result.index = pd.to_datetime(result.index)
+    idx = pd.DatetimeIndex(result.index)
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    result.index = idx
+    return result
+
+
+# ============================================================
 # CLOSED-CANDLE HELPER
 # ============================================================
 
@@ -378,9 +396,12 @@ def analyze_stock(ticker_symbol):
         pullback,
     )
 
+    performance_intraday = _normalize_datetime_index_utc_naive(data)
+    performance_daily = _normalize_datetime_index_utc_naive(daily)
+
     price_performance = calculate_price_performance(
-        data,
-        daily,
+        performance_intraday,
+        performance_daily,
     )
 
     rsi_divergence = detect_rsi_divergence(
@@ -964,11 +985,14 @@ def render_live_dashboard(settings: dict):
     # Clicking Analyze forces a fresh fetch immediately. Risk-setting changes
     # and other UI reruns reuse the same market data instead of downloading it again.
     force_refresh = bool(settings.get("force_refresh", False))
+    ANALYSIS_CACHE_VERSION = "v3_datetime_intraday_plan"
     cache_bucket = st.session_state.setdefault(
         "stock_market_analysis_cache",
         {},
     )
     cached = cache_bucket.get(current_ticker)
+    if cached is not None and cached.get("version") != ANALYSIS_CACHE_VERSION:
+        cached = None
     now_ts = time.time()
     cache_age = (
         now_ts - cached["fetched_at"]
@@ -992,6 +1016,7 @@ def render_live_dashboard(settings: dict):
                 )
 
             cache_bucket[current_ticker] = {
+                "version": ANALYSIS_CACHE_VERSION,
                 "fetched_at": time.time(),
                 "analysis_result": analysis_result,
                 "multi_timeframe": multi_timeframe,
@@ -1127,6 +1152,12 @@ def render_live_dashboard(settings: dict):
     )
 
     intraday_signal = calculate_intraday_signal(row)
+
+    intraday_trade_plan = build_intraday_trade_plan(
+        intraday_signal=intraday_signal,
+        row=row,
+        recent_data=data.loc[:closed_candle_index],
+    )
 
 
     # ========================================================
